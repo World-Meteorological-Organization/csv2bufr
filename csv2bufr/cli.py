@@ -78,7 +78,6 @@ def mappings():
 @click.pass_context
 def list_mappings(ctx):
     templates = c2bt.list_templates()
-    click.echo(json.dumps(templates))
     for tmpl in templates.items():
         click.echo(json.dumps(tmpl, indent=4))
 
