@@ -46,7 +46,7 @@ _warnings_global[tidx] = []
 @pytest.fixture
 def mapping_dict():
     return {
-        "conformsTo": "csv2bufr-template-v2.json",
+        "conformsTo": ["csv2bufr-template-v2.json"],
         "metadata": {
             "label": "pytest",
             "description": "pytest template",
