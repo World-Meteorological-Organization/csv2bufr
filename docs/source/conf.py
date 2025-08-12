@@ -73,8 +73,8 @@ html_theme_path = wmo_sphinx_theme.get_html_theme_path()
 html_static_path = ['_static']
 
 html_css_files = [
-        'wmo.css',  # overrides for wide tables in RTD theme
-        ]
+    'wmo.css',  # overrides for wide tables in RTD theme
+]
 
 # options for maths
 imgmath_image_format = 'svg'
