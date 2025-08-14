@@ -29,6 +29,7 @@ from jsonschema import validate
 THISDIR = os.path.dirname(os.path.realpath(__file__))
 LOGGER = logging.getLogger(__name__)
 SCHEMA = f"{THISDIR}{os.sep}resources{os.sep}schema"
+SCHEMA_VERSIONS = ['csv2bufr-template-v2.json', 'csv2bufr-template-v3.json']
 TEMPLATE_DIRS = []  # [Path("./")]
 
 _SUCCESS_ = True
@@ -152,7 +153,7 @@ def validate_template(mapping: dict) -> bool:
     :returns: `bool` of validation result
     """
     # load internal file schema for mappings
-    file_schema = f"{SCHEMA}{os.sep}csv2bufr-template-v2.json"
+    file_schema = f"{SCHEMA}{os.sep}csv2bufr-template-v3.json"
     try:
         with open(file_schema) as fh:
             schema = json.load(fh)
@@ -178,10 +179,17 @@ def index_templates() -> bool:
                     # check if valid mapping file
                     with template.open() as fh:
                         tmpl = json.load(fh)
-                    if 'csv2bufr-template-v2.json' not in tmpl.get("conformsTo",[]):  # noqa
-                        LOGGER.warning("'csv2bufr-template-v2.json' not found in " +  # noqa
-                                       f"conformsTo for file {template}, skipping")  # noqa
+                    valid_schema = False
+                    for sc in SCHEMA_VERSIONS:
+                        if sc in tmpl.get("conformsTo", []):
+                            valid_schema = True
+                            break
+                    if not valid_schema:
+                        LOGGER.warning(
+                            "No valid schema not found in " +  # noqa
+                            f"conformsTo for file {template}, skipping")  # noqa
                         continue
+
                     if validate_template(tmpl) == _SUCCESS_:
                         # get label if exists else set to empty string
                         fname = str(template)

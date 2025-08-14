@@ -1,0 +1,140 @@
+{
+    "$id": "csv2bufr.wis2.0.node.wis",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+        "conformsTo": {
+            "type": ["array", "string"]
+        },
+        "metadata": {
+            "type": "object",
+            "requiered": ["label","description","version","author","editor","dateCreated","dateModified","id"],
+            "properties": {
+                "label": {
+                    "type": "string"
+                },
+                "description": {
+                    "type": "string"
+                },
+                "version": {
+                    "type": "string"
+                },
+                "author": {
+                    "type": "string"
+                },
+                "editor": {
+                    "type": "string"
+                },
+                "dateCreated": {
+                    "type": "string",
+                    "format": "date"
+                },
+                "dateModified": {
+                    "type": "string",
+                    "format": "date"
+                },
+                "id": {
+                    "type": "string",
+                    "format": "uuid4"
+                }
+            }
+        },
+
+        "inputShortDelayedDescriptorReplicationFactor": {
+            "type": "array",
+            "items": {"type": "integer"}
+        },
+        "inputDelayedDescriptorReplicationFactor": {
+            "type": "array",
+            "items": {"type": "integer"}
+        },
+        "inputExtendedDelayedDescriptorReplicationFactor": {
+            "type": "array",
+            "items": {"type": "integer"}
+        },
+        "number_header_rows": {
+            "type": "integer",
+            "description": "Number of header rows in file before the data"
+        },
+        "column_names_row": {
+            "type": "integer",
+            "description": "Which header line the column names is given on"
+
+        },
+        "wigos_station_identifier": {
+            "type": "string",
+            "description": "Either the WIGOS station identifier for the data or the column in the CSV file containing the identifier"
+        },
+        "delimiter": {
+            "type": "string",
+            "description": "The delimiter used to separate fields in the input csv file, must be one of ',', ';'. '|' or [tab]"
+        },
+        "quoting": {
+            "type": "string",
+            "description": "CSV quoting method to use, must be one of QUOTE_NONNUMERIC, QUOTE_ALL, QUOTE_MINIMAL or QUOTE_NONE"
+        },
+        "quotechar": {
+            "type": "string",
+            "description": "quote character to use, e.g. \", ' etc"
+        },
+        "header":{
+            "type": "array",
+            "items": {"$ref": "#/$defs/bufr_element"},
+            "description": "Contents of header sections of BUFR message"
+        },
+        "data": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/bufr_element"},
+            "description": "mapping from CSV file (or metadata json file) to BUFR"
+        }
+    },
+    "required" : [
+        "conformsTo", "metadata",
+        "inputShortDelayedDescriptorReplicationFactor",
+        "inputDelayedDescriptorReplicationFactor",
+        "inputExtendedDelayedDescriptorReplicationFactor",
+        "column_names_row","number_header_rows","header","data"],
+
+    "$defs":{
+        "bufr_element": {
+            "type": "object",
+            "properties": {
+                "eccodes_key": {
+                    "type": "string",
+                    "descripition": "eccodes key used to set the value in the BUFR data"
+                },
+                "value": {
+                    "type": [
+                        "string"
+                    ],
+                    "description": "where to extract the value from, can be one off 'data','metadata','const','array' followed by the value or column header"
+                },
+                "valid_min": {
+                    "type": "string",
+                    "description": "Minimum valid value for parameter if set"
+                },
+                "valid_max": {
+                    "type": "string",
+                    "description": "Maximum value for for the parameter if set"
+                },
+                "scale": {
+                    "type": "string",
+                    "description": "Value used to scale the data by before encoding using the same conventions as in BUFR"
+                },
+                "offset": {
+                    "type": "string",
+                    "description": "Value added to the data before encoding to BUFR following the same conventions as BUFR"
+                }
+            },
+            "required": ["eccodes_key", "value"],
+            "allOf": [
+                {
+                    "dependentRequired": {"scale": ["offset"]}
+                },
+                {
+                    "dependentRequired": {"offset": ["scale"]}
+                }
+            ]
+        }
+    }
+}

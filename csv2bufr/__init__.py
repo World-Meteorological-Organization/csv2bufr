@@ -361,7 +361,7 @@ class BUFRMessage:
 
     def create_template(self) -> None:
         template = {}
-        template["conformsTo"] = "csv2bufr-template-v2.json"
+        template["conformsTo"] = ["csv2bufr-template-v3.json"]
         template["metadata"] = {
             "label": "",
             "description": "",
