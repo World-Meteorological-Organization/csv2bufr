@@ -88,6 +88,10 @@ def list_mappings(ctx):
 @click.option("--output", "output", help="File to save the template to")
 @cli_option_verbosity
 def create_mappings(ctx, sequence, output, verbosity):
+    if not sequence:
+        click.echo("Error: Please provide a BUFRsequence.", err=True)
+        ctx.exit(1)  # Exit with a non-zero status to indicate an error
+    
     msg = BUFRMessage(sequence)
     template = msg.create_template()
     if output:
