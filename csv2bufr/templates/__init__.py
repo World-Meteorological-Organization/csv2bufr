@@ -181,7 +181,7 @@ def index_templates() -> bool:
                         tmpl = json.load(fh)
                     valid_schema = False
                     for sc in SCHEMA_VERSIONS:
-                        if sc in tmpl.get("conformsTo",[]):
+                        if sc in tmpl.get("conformsTo", []):
                             valid_schema = True
                             break
                     if not valid_schema:
