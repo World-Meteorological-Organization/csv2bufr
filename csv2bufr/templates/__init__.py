@@ -152,7 +152,7 @@ def validate_template(mapping: dict) -> bool:
     :returns: `bool` of validation result
     """
     # load internal file schema for mappings
-    file_schema = f"{SCHEMA}{os.sep}csv2bufr-template-v2.json"
+    file_schema = f"{SCHEMA}{os.sep}csv2bufr-template-v3.json"
     try:
         with open(file_schema) as fh:
             schema = json.load(fh)
@@ -178,10 +178,15 @@ def index_templates() -> bool:
                     # check if valid mapping file
                     with template.open() as fh:
                         tmpl = json.load(fh)
-                    if 'csv2bufr-template-v2.json' not in tmpl.get("conformsTo",[]):  # noqa
-                        LOGGER.warning("'csv2bufr-template-v2.json' not found in " +  # noqa
+                    if 'csv2bufr-template-v3.json' not in tmpl.get("conformsTo",[]):  # noqa
+                        if 'csv2bufr-template-v2.json' in tmpl.get("conformsTo",[]):  # noqa
+                            LOGGER.warning("Deprecated 'csv2bufr-template-v2.json' found in " +  # noqa
+                                       f"conformsTo for file {template}")  # noqa
+                            LOGGER.warning("Support for 'csv2bufr-template-v2.json' will be removed in a future release")  # noqa
+                        else:
+                            LOGGER.warning("'csv2bufr-template-v3.json' not found in " +  # noqa
                                        f"conformsTo for file {template}, skipping")  # noqa
-                        continue
+                            continue
                     if validate_template(tmpl) == _SUCCESS_:
                         # get label if exists else set to empty string
                         fname = str(template)
