@@ -865,8 +865,11 @@ def transform(data: str, mappings: dict) -> Iterator[dict]:
     # =========================================
     fh = StringIO(data)
     try:
-        reader = csv.reader(fh, delimiter=_delimiter, quoting=_quoting,
-                            quotechar=_quotechar)
+        if _quoting == csv.QUOTE_NONE:
+            reader = csv.reader(fh, delimiter=_delimiter, quoting=_quoting)
+        else:
+            reader = csv.reader(fh, delimiter=_delimiter, quoting=_quoting,
+                                quotechar=_quotechar)
     except Exception as e:
         msg = f"Error ({e}) reading csv data\n{data}"
         LOGGER.critical(f"{msg}")
