@@ -869,7 +869,7 @@ def transform(data: str, mappings: dict) -> Iterator[dict]:
             reader = csv.reader(fh, delimiter=_delimiter, quoting=_quoting)
         else:
             reader = csv.reader(fh, delimiter=_delimiter, quoting=_quoting,
-                            quotechar=_quotechar)
+                                quotechar=_quotechar)
     except Exception as e:
         msg = f"Error ({e}) reading csv data\n{data}"
         LOGGER.critical(f"{msg}")
