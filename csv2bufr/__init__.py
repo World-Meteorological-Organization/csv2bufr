@@ -383,7 +383,7 @@ class BUFRMessage:
         template["column_names_row"] = 1
         template["delimiter"] = ","
         template["quoting"] = "QUOTE_NONE"
-        template["quotechar"] = ""
+        template["quotechar"] = '"'
         template["header"] = []
         # create header section
         for element in HEADERS:
