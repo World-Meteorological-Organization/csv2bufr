@@ -327,7 +327,7 @@ class BUFRMessage:
             # now add attributes (excl. BUFR header elements)
             if key not in HEADERS:
                 for attr in ATTRIBUTES:
-                    if attr == "code":  # we are getting the FXXYYY code. This doesn't exist for BUFR header elements or operators
+                    if attr == "code":  # noqa we are getting the FXXYYY code. This doesn't exist for BUFR header elements or operators
                         try:
                             self.dict[key][attr] = \
                                 codes_get(bufr_msg, f"{key}->{attr}")
