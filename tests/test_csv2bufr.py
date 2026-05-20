@@ -21,7 +21,6 @@
 
 import csv
 import os
-import threading
 
 from io import StringIO
 import logging
@@ -29,17 +28,12 @@ import logging
 from eccodes import (codes_bufr_new_from_samples, codes_release)
 import pytest
 
-from csv2bufr import (apply_scaling, validate_value,
-                      transform, SUCCESS, _warnings_global)
+from csv2bufr import (apply_scaling, validate_value, transform, SUCCESS)
 
 import csv2bufr.templates as c2bt
 
 LOGGER = logging.getLogger(__name__)
 LOGGER.setLevel("DEBUG")
-
-# set up warnings dict
-tidx = f"t-{threading.get_ident()}"
-_warnings_global[tidx] = []
 
 
 # test data
@@ -222,15 +216,11 @@ def test_validate_value_fail():
 # test to check that valid_value returns null value when we expect it to
 def test_validate_value_nullify():
     input_value = 10.0
-    tid = f"t-{threading.get_ident()}"
-    if tid not in _warnings_global:
-        _warnings_global[tid] = []
     try:
         value = validate_value("test value", input_value, 0.0, 9.9, True)
     except Exception:
         assert False
     assert value is None
-    del _warnings_global[tid]
 
 
 # check that test transform works

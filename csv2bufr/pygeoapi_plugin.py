@@ -38,6 +38,7 @@ PROCESS_METADATA = {
         "href": "https://example.org/process",
         "hreflang": "en-US",
     }],
+    'jobControlOptions': ['sync-execute', 'async-execute'],
     "inputs": {
         "data": {
             "title": "CSV Data",

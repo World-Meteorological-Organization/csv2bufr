@@ -29,7 +29,7 @@ from io import StringIO, BytesIO
 import json
 import logging
 import os.path
-import threading
+from contextvars import ContextVar
 from typing import Any, Iterator, Union
 
 from eccodes import (codes_bufr_new_from_samples,
@@ -96,7 +96,15 @@ DEFAULTS = {
     'typicalSecond': 'const:0'
 }
 
-_warnings_global = {}
+_warnings_var: ContextVar[list] = ContextVar('_warnings', default=None)
+
+
+def _collect_warning(msg: str) -> None:
+    LOGGER.warning(msg)
+    _warnings = _warnings_var.get(None)
+    if _warnings is not None:
+        _warnings.append(msg)
+
 
 # status codes
 FAILED = 0
@@ -126,8 +134,6 @@ QUOTECHAR = '"'
 
 # function to find position in array of requested element
 def index_(key, mapping):
-    global _warnings_global
-    tidx = f"t-{threading.get_ident()}"
     idx = 0
     for item in mapping:
         if item['eccodes_key'] == key:
@@ -135,8 +141,7 @@ def index_(key, mapping):
         idx += 1
     if NULLIFY_INVALID:
         msg = f"Warning: key {key} not found in {mapping}"
-        LOGGER.warning(msg)
-        _warnings_global[tidx].append(msg)
+        _collect_warning(msg)
         return None
     else:
         msg = f"Error: key {key} not found in {mapping}"
@@ -145,9 +150,6 @@ def index_(key, mapping):
 
 
 def parse_value(element: str, data: dict):
-    global _warnings_global
-    tidx = f"t-{threading.get_ident()}"
-
     data_type = element.split(":")
     if data_type[0] == "const":
         value = data_type[1]
@@ -160,8 +162,7 @@ def parse_value(element: str, data: dict):
         if column not in data:
             msg = f"Column {column} not found in input data: {data}"
             if NULLIFY_INVALID:
-                LOGGER.warning(msg)  # noqa
-                _warnings_global[tidx].append(msg)
+                _collect_warning(msg)
             else:
                 # LOGGER.error(msg)  # noqa
                 raise ValueError(msg)
@@ -187,8 +188,6 @@ def parse_value(element: str, data: dict):
 
 # function to retrieve data
 def get_(key: str, mapping: dict, data: dict):
-    global _warnings_global
-    tidx = f"t-{threading.get_ident()}"
     # get position in mapping
     try:
         idx = index_(key, mapping)
@@ -197,8 +196,7 @@ def get_(key: str, mapping: dict, data: dict):
     except Exception as e:
         msg = f"Warning ({e}) raised getting value for {key}, None returned for {key}"  # noqa
         if NULLIFY_INVALID:
-            LOGGER.warning(msg)  # noqa
-            _warnings_global[tidx].append(msg)
+            _collect_warning(msg)
             value = None
         else:
             raise KeyError(msg)
@@ -221,7 +219,6 @@ def apply_scaling(value: Union[NUMBERS], scale: Union[NUMBERS],
 
     :returns: scaled value
     """
-    global _warnings
     if isinstance(value, NUMBERS):
         if None not in [scale, offset]:
             try:
@@ -249,8 +246,6 @@ def validate_value(key: str, value: Union[NUMBERS],
 
     :returns: validated value
     """
-    global _warnings_global
-    tidx = f"t-{threading.get_ident()}"
     # TODO move this function to the class as part of set value
 
     if value is None:
@@ -263,8 +258,7 @@ def validate_value(key: str, value: Union[NUMBERS],
         if (value > valid_max) or (value < valid_min):
             msg = f"{key}: Value ({value}) out of valid range ({valid_min} - {valid_max})."  # noqa
             if nullify_on_fail:
-                LOGGER.warning(f"{msg}; Element set to missing")
-                _warnings_global[tidx].append(f"{msg}; Element set to missing")
+                _collect_warning(f"{msg}; Element set to missing")
                 return None
             else:
                 raise ValueError(msg)
@@ -333,13 +327,23 @@ class BUFRMessage:
             # now add attributes (excl. BUFR header elements)
             if key not in HEADERS:
                 for attr in ATTRIBUTES:
-                    try:
-                        self.dict[key][attr] = \
-                            codes_get(bufr_msg, f"{key}->{attr}")
-                    except Exception as e:
-                        msg = f"Error ({e}) getting attribute {attr} for {key}."  # noqa
-                        # LOGGER.error(f"{msg}")
-                        raise RuntimeError(msg)
+                    if attr == "code":  # noqa we are getting the FXXYYY code. This doesn't exist for BUFR header elements or operators
+                        try:
+                            self.dict[key][attr] = \
+                                codes_get(bufr_msg, f"{key}->{attr}")
+                        except Exception as e:
+                            msg = f"Error ({e}) getting attribute {attr} for {key}."  # noqa
+                            LOGGER.error(f"{msg}")
+                            break
+                    else:
+
+                        try:
+                            self.dict[key][attr] = \
+                                codes_get(bufr_msg, f"{key}->{attr}")
+                        except Exception as e:
+                            msg = f"Error ({e}) getting attribute {attr} for {key}."  # noqa
+                            # LOGGER.error(f"{msg}")
+                            raise RuntimeError(msg)
 
         codes_bufr_keys_iterator_delete(iterator)
         # ============================================
@@ -771,9 +775,7 @@ def transform(data: str, mappings: dict) -> Iterator[dict]:
 
     :returns: iterator
     """
-    global _warnings_global
-    job_id = f"t-{threading.get_ident()}"  # job ID based on thread
-    _warnings_global[job_id] = []
+    _warnings_var.set([])
     # ======================
     # validate mapping files
     # ======================
@@ -836,8 +838,7 @@ def transform(data: str, mappings: dict) -> Iterator[dict]:
         _delimiter = mappings["delimiter"]
         if _delimiter not in [",", ";", "|", "\t"]:
             msg = "Invalid delimiter specified in mapping template, reverting to comma ','"  # noqa
-            LOGGER.warning(msg)
-            _warnings_global[job_id].append(msg)
+            _collect_warning(msg)
             _delimiter = ","
     else:
         _delimiter = DELIMITER
@@ -899,6 +900,7 @@ def transform(data: str, mappings: dict) -> Iterator[dict]:
 
     # now iterate over remaining rows
     for row in reader:
+        token = _warnings_var.set([])
         wsi = None
         result = dict()
         # check and make sure we have ascii data
@@ -907,8 +909,7 @@ def transform(data: str, mappings: dict) -> Iterator[dict]:
                 if not val.isascii():
                     if NULLIFY_INVALID:
                         msg = f"csv read error, non ASCII data detected ({val}), skipping row"  # noqa
-                        LOGGER.warning(msg)  # noqa
-                        _warnings_global[job_id].append(msg)
+                        _collect_warning(msg)
                         LOGGER.debug(row)
                         continue
                     else:
@@ -956,7 +957,7 @@ def transform(data: str, mappings: dict) -> Iterator[dict]:
                 "code": PASSED,
                 "message": "",
                 "errors": [],
-                "warnings": message.warnings + _warnings_global[job_id]
+                "warnings": message.warnings + (_warnings_var.get() or [])
             }
             cksum = message.md5()
             # now identifier based on WSI and observation date as identifier
@@ -991,7 +992,7 @@ def transform(data: str, mappings: dict) -> Iterator[dict]:
                 "code": FAILED,
                 "message": "Error encoding row, BUFR set to None",
                 "errors": [f"{msg}\n\t\tData: {data_dict}"],
-                "warnings": message.warnings + _warnings_global[job_id]
+                "warnings": message.warnings + (_warnings_var.get() or [])
             }
             result["_meta"] = {
                 "id": None,
@@ -1011,9 +1012,10 @@ def transform(data: str, mappings: dict) -> Iterator[dict]:
 
         time_ = datetime.now(timezone.utc).isoformat()
         LOGGER.info(f"{time_}|{result['_meta']}")
-        # now yield result back to caller
-        yield result
-        # clear warnings
-        _warnings_global[job_id] = []
+        try:
+            # now yield result back to caller
+            yield result
+        finally:
+            _warnings_var.reset(token)
 
     fh.close()
