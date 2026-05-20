@@ -5,36 +5,24 @@ on: [ push, pull_request ]
 jobs:
   main:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+    container:
+      image: wmoim/dim_eccodes_baseimage:noble_eccodes-2.44
 
     steps:
     - uses: actions/checkout@v4
-    - uses: actions/setup-python@v5
-      name: Setup Python ${{ matrix.python-version }}
-      with:
-        python-version: ${{ matrix.python-version }}
-
-    - name: Setup conda
-      uses: s-weigand/setup-conda@v1
-      with:
-        update-conda: true
-        python-version: ${{ matrix.python-version }}
-        conda-channels: anaconda, conda-forge
-
 
     - name: Install requirements 📦
       run: |
-        conda install eccodes
-        python3 -m pip install --upgrade pip
+        apt-get update
+        apt-get install -y wget
+        pip3 install --upgrade pip
         pip3 install -r requirements.txt
         pip3 install -r requirements-dev.txt
-        python3 setup.py install
+        pip3 install .
         mkdir -p /opt/csv2bufr
         cd /opt/csv2bufr
-        wget https://github.com/wmo-im/csv2bufr-templates/archive/refs/tags/v0.2.tar.gz
-        tar -zxf v0.2.tar.gz --strip-components=1 csv2bufr-templates-0.2/templates
+        wget https://github.com/wmo-im/csv2bufr-templates/archive/refs/tags/v0.5.tar.gz
+        tar -zxf v0.5.tar.gz --strip-components=1 csv2bufr-templates-0.5/templates
     - name: run tests ⚙️
       run: |
         pytest

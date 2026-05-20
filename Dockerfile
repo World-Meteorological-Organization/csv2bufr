@@ -18,7 +18,7 @@
 # under the License.
 #
 ###############################################################################
-FROM wmoim/dim_eccodes_baseimage:jammy-2.36.0
+FROM wmoim/dim_eccodes_baseimage:noble_eccodes-2.44
 
 # update image
 RUN apt-get update -y && \
@@ -28,7 +28,7 @@ RUN apt-get update -y && \
 # install csv2bufr
 WORKDIR /tmp
 COPY . /tmp/csv2bufr
-RUN cd /tmp/csv2bufr && python3 setup.py install && cd /tmp && rm -R csv2bufr
+RUN cd /tmp/csv2bufr && pip3 install . && cd /tmp && rm -R csv2bufr
 
 # get latest version of csv2bufr templates and install
 RUN export c2bt=`git -c 'versionsort.suffix=-' ls-remote --tags --sort='v:refname' https://github.com/World-Meteorological-Organization/csv2bufr-templates.git | tail -1 | cut -d '/' -f 3|sed 's/v//'` && \

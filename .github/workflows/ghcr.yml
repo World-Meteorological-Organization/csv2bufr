@@ -3,12 +3,13 @@
 # separate terms of service, privacy policy, and support
 # documentation.
 
-name: Create and publish image to GitHub Container Registry
+name: Publish to GHCR
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
@@ -24,7 +25,7 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
       - name: Build image
         run: docker build . --file Dockerfile --tag $IMAGE_NAME --label "runnumber=${GITHUB_RUN_ID}"
