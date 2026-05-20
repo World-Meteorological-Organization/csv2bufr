@@ -13,6 +13,8 @@ jobs:
 
     - name: Install requirements 📦
       run: |
+        apt get update
+        apt get install -y wget
         pip3 install --upgrade pip
         pip3 install -r requirements.txt
         pip3 install -r requirements-dev.txt
