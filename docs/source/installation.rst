@@ -12,55 +12,60 @@ be found on the ecCodes documentation pages: `https://confluence.ecmwf.int/displ
 The following Python packages are required by the csv2bufr module:
 
 * `eccodes <https://pypi.org/project/eccodes/>`__ (NOTE: this is separate from the ecCodes library)
+* `jsonschema <https://pypi.org/project/jsonschema/>`_
 
 Additionally, the command line interface to csv2bufr requires:
 
 * `click <https://pypi.org/project/click/>`_
 
-All the above packages can be installed by running:
-
-.. code-block:: bash
-
-   pip install -r requirements.txt
+These are installed automatically when installing csv2bufr via pip.
 
 Installation
 ************
 
+PyPI (recommended)
+------------------
+
+The simplest way to install csv2bufr is from `PyPI <https://pypi.org/project/csv2bufr/>`_:
+
+.. code-block:: bash
+
+   pip install csv2bufr
+
+This will automatically install all required Python dependencies. The ecCodes software library
+must be installed separately beforehand (see Dependencies above).
+
 Docker
 ------
-The quickest way to install and run the software is via a Docker image containing all the required
-libraries and Python modules:
+
+A Docker image is available that bundles the ecCodes library, all Python dependencies and
+csv2bufr itself:
 
 .. code-block:: shell
 
    docker pull wmoim/csv2bufr
 
-This installs a `Docker image <https://hub.docker.com/r/wmoim/csv2bufr>`_ based on Ubuntu and includes the ecCodes software library, dependencies noted above
-and the csv2bufr module (including the command line interface).
+See the `Docker Hub page <https://hub.docker.com/r/wmoim/csv2bufr>`_ for further details.
 
-Source
-------
+Source (development)
+--------------------
 
-Alternatively, csv2bufr can be installed from source. First clone the repository and navigate to the cloned folder / directory:
+To install directly from source (e.g. to contribute or test unreleased changes), clone the
+repository and install with pip:
 
 .. code-block:: bash
 
-   git clone https://github.com/World-Meteorological-Organization/csv2bufr.git -b dev
+   git clone https://github.com/World-Meteorological-Organization/csv2bufr.git
    cd csv2bufr
+   pip install .
 
-If running in a Docker environment, build the Docker image and run the container:
+Released source archives are also available from the
+`GitHub releases page <https://github.com/World-Meteorological-Organization/csv2bufr/releases>`_.
 
-.. code-block:: bash
-
-   docker build -t csv2bufr .
-   docker run -it -v ${pwd}:/app csv2bufr
-   cd /app
-
-The above step can be skipped if not using Docker. Now install the module and test:
+To verify the installation:
 
 .. code-block:: bash
 
-   python3 setup.py install
    csv2bufr --help
 
 The following output should be shown:
@@ -68,17 +73,17 @@ The following output should be shown:
 .. code-block:: bash
 
    Usage: csv2bufr [OPTIONS] COMMAND [ARGS]...
-   
+
      csv2bufr
-   
+
    Options:
      --version  Show the version and exit.
      --help     Show this message and exit.
-   
+
    Commands:
      data      data workflows
      mappings  stored mappings
-   
+
 Environment variables
 *********************
 Three environment variables are defined and can be used to set the originating centre and

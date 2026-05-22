@@ -7,24 +7,33 @@ BUFR template mapping
 
 The mapping between the input CSV data and the output BUFR data is specified in a JSON file.
 The csv2bufr module validates the mapping file against the schema shown at the bottom of this page prior to attempting the transformation to BUFR.
-This schema specifies 7 primary properties all of which are mandatory:
+The schema specifies the following required properties:
 
+- ``conformsTo`` - array containing the schema version identifier, must include ``"csv2bufr-template-v3.json"``
+- ``metadata`` - object containing template metadata: ``label``, ``description``, ``version``, ``author``, ``editor``, ``dateCreated``, ``dateModified``, and ``id`` (UUID)
 - ``inputDelayedDescriptorReplicationFactor`` - array of integers, values for the delayed descriptor replication factors to use
 - ``inputShortDelayedDescriptorReplicationFactor`` - array of integers, values for the short delayed descriptor replication factors to use
 - ``inputExtendedDelayedDescriptorReplicationFactor`` - array of integers, values for the extended delayed descriptor replication factors to use
-- ``number_header_rows`` - integer, the number of header rows in the file before the first data, including the row with column names.
-- ``column_names_row`` - integer, the row number that gives the column names.
-- ``wigos_station_identifier`` - either constant WIGOS station identifier (e.g. ``const:0-20000-0-123``) or column from csv data file containing the WSI (e.g. ``data:WSI_column``).
+- ``number_header_rows`` - integer, the number of header rows in the file before the first data, including the row with column names
+- ``column_names_row`` - integer, the row number that gives the column names
 - ``header`` - array of objects (see below), header section containing metadata
-- ``data`` - array of object (see below) section mapping from the CSV columns to the BUFR elements
+- ``data`` - array of objects (see below), section mapping from the CSV columns to the BUFR elements
+
+The following properties are optional:
+
+- ``wigos_station_identifier`` - either a constant WIGOS station identifier (e.g. ``const:0-20000-0-123``) or the column from the CSV file containing the WSI (e.g. ``data:WSI_column``). If omitted, the WSI is constructed from the individual WIGOS component fields (``#1#wigosIdentifierSeries``, ``#1#wigosIssuerOfIdentifier``, ``#1#wigosIssueNumber``, ``#1#wigosLocalIdentifierCharacter``) in the ``data`` section.
+- ``delimiter`` - field separator character in the input CSV file; one of ``,`` (default), ``;``, ``|``, or tab
+- ``quoting`` - CSV quoting mode; one of ``QUOTE_NONNUMERIC`` (default), ``QUOTE_ALL``, ``QUOTE_MINIMAL``, or ``QUOTE_NONE``
+- ``quotechar`` - quote character used in the CSV file; default ``"``
 
 The header and data sections contain arrays of ``bufr_element`` objects mapping to either the different fields
 in the header sections of the BUFR message or to the data section respectively. More information is provided below.
 In both cases the field ``eccodes_key`` from the ``bufr_element`` object is used to indicate the BUFR element mapped rather than the 6 digit  BUFR FXXYYY code.
 The field ``value`` specifies where the data to encode comes from. This can be one of the following:
 
-- data: this specifies that the data should come from the data file.
-- const: this specifies that a constant value should be used
+- ``data:`` the value is read from the named column in the CSV file (e.g. ``"data:temperature"``)
+- ``const:`` a fixed constant value is used (e.g. ``"const:4"``)
+- ``array:`` a comma-separated list of values is used as an array (e.g. ``"array:301150,301011,301012"``); used for ``unexpandedDescriptors`` in the header
 
 For example, the code block below shows how the pressure reduced to mean sea level would be mapped from the column "mslp" in the CSV file
 to the BUFR element indicated by the eccodes key "pressureReducedToMeanSeaLevel" (FXXYYY = 010051).
@@ -79,7 +88,7 @@ must still be included but may be set to an empty array. e.g.
 
    {
        "inputDelayedDescriptorReplicationFactor": [],
-       "inputShortDelayedDescriptorReplicationFactor": []
+       "inputShortDelayedDescriptorReplicationFactor": [],
        "inputExtendedDelayedDescriptorReplicationFactor": []
    }
 
@@ -97,13 +106,8 @@ are being mapped to as described above and up to 3 others pieces of information:
 - simple scaling and offset parameters (``scale``, ``offset``)
 
 Only one source can be mapped, if multiple sources are specified the validation of the mapping file by csv2bufr will fail.
-As noted at the start of this page. the ``value`` field maps the data to one of:
-
-- data: this specifies that the data should come from the data file
-- const: this specifies that a constant value should be used
-
-and takes the form ``"value": "<keyword>:<column|value>"`` where ``<keyword>`` is the string ``data`` or ``const``.
-``<column|value>`` can specify either the column name from the data file or it can specify a constant value to use.
+As noted at the start of this page, the ``value`` field takes the form ``"<keyword>:<column|value>"``,
+where ``<keyword>`` is one of ``data``, ``const``, or ``array`` as described above.
 
 The ``valid_min`` and ``valid_max`` are optional and can be used to perform a basic quality control of numeric fields.
 The values to use are specified in the same way as for the ``value`` element, with the values coming from either a
@@ -152,8 +156,8 @@ The index is indicated within the eccodes_key using ``#index#eccodes_key``, an e
    {
        "data":[
            {
-               "#1#eccodes_key": "pressureReducedToMeanSeaLevel",
-               "csv_column": "data:mslp",
+               "eccodes_key": "#1#pressureReducedToMeanSeaLevel",
+               "value": "data:mslp",
                "scale": "const:2",
                "offset": "const:0"
            }
@@ -174,9 +178,9 @@ the ``scale`` and ``offset`` fields. Some additional examples are given below.
        "data":[
            {
                "eccodes_key": "airTemperature",
-               "value": "data:AT-fahrenheiht",
+               "value": "data:AT-fahrenheit",
                "scale": "const:-0.25527",
-               "offset": "const:459.67"
+               "offset": "const:255.37"
            },
            {
                "eccodes_key": "airTemperature",
@@ -196,7 +200,7 @@ the ``scale`` and ``offset`` fields. Some additional examples are given below.
 Schema
 ------
 
-.. literalinclude:: ../../csv2bufr/templates/resources/schema/csv2bufr-template-v2.json
+.. literalinclude:: ../../csv2bufr/templates/resources/schema/csv2bufr-template-v3.json
 
 Built in templates and search path
 ----------------------------------

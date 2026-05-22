@@ -11,7 +11,7 @@ For example, the command line interface reads in data from a CSV file, converts 
 
    csv2bufr data transform <my-csv-file.csv> \
        --bufr-template <csv-to-bufr-mapping.json> \
-       --output <output-directory-path>
+       --output-dir <output-directory-path>
 
 This command is explained in more detail below.
 
@@ -25,7 +25,7 @@ and writes the output to directory ``output-directory-path``:
 
    csv2bufr data transform <my-csv-file.csv> \
        --bufr-template <csv-to-bufr-mapping.json> \
-       --output <output-directory-path>
+       --output-dir <output-directory-path>
 
 The command is built on the `Python Click module <https://click.palletsprojects.com/en/8.0.x/>`_ and is formed of
 three components (``csv2bufr data transform``), 1 arguments and 2 mandatory options (specified by --).
@@ -34,7 +34,7 @@ The options specify various configuration files to use.
 
 #. ``my-csv-file.csv``: argument specifying the CSV data file to process
 #. ``--bufr-template csv-to-bufr-mapping.json``: option followed by the bufr mapping template to use
-#. ``--output-dir output-directory-path``: option followed by output directory to write BUFR file to. The output filename is set using the md5 checksum of the BUFR data to ensure uniqueness, future versions will use the WIGOS ID and timestamp of the data to set the filename.
+#. ``--output-dir output-directory-path``: option followed by the directory to write BUFR files to. Output filenames are derived from the WIGOS station identifier and observation timestamp, e.g. ``WIGOS_0-20000-0-06700_20220210T060000.bufr4``.
 
 The output BUFR files can be validated using a tool such as the `ECMWF BUFR validator <https://apps.ecmwf.int/codes/bufr/validator/>`_.
 
@@ -89,7 +89,7 @@ The command line interface uses the ``transform`` function from the csv2bufr mod
    # iterate over items
    for item in result:
        # get id and phenomenon time to use in output filename
-       wsid = item["_meta"]["wigos_station_identifier"]  # WIGOS station ID
+       wsid = item["_meta"]["properties"]["wigos_station_identifier"]  # WIGOS station ID
        geometry = item["_meta"]["geometry"]  # GeoJSON geometry object
        timestamp = item["_meta"]["properties"]["datetime"]  # phenomenonTime as datetime object
        timestamp = timestamp.strftime("%Y%m%dT%H%MZ")  # convert to string
@@ -112,3 +112,7 @@ Each item returned contains a dictionary with the following elements:
 - ``item["_meta"]["properties"]["datetime"]`` characteristic date of data contained in result (from BUFR)
 - ``item["_meta"]["properties"]["originating_centre"]`` originating centre for data (from BUFR)
 - ``item["_meta"]["properties"]["data_category"]`` data category (from BUFR)
+- ``item["_meta"]["result"]`` encoding status dictionary
+- ``item["_meta"]["result"]["code"]`` 1 if encoding succeeded, 0 if it failed
+- ``item["_meta"]["result"]["errors"]`` list of error messages (empty on success)
+- ``item["_meta"]["result"]["warnings"]`` list of non-fatal warnings (e.g. values set to missing due to failed validation)

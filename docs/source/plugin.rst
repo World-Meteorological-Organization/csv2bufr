@@ -5,7 +5,7 @@ pygeoapi plugin
 Overview
 ********
 
-csv2bufr also provides a custom [pygeoapi](https://pygeoapi.io) processing plugin, providing
+csv2bufr also provides a custom `pygeoapi <https://pygeoapi.io>`_ processing plugin, providing
 csv2bufr functionality via OGC API - Processes.
 
 Installation

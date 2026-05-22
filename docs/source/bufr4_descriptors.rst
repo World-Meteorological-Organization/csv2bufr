@@ -1,3 +1,5 @@
+.. _bufr4_descriptors:
+
 BUFR4 Descriptors
 =================
 
