@@ -19,16 +19,13 @@ docker pull wmoim/csv2bufr
 
 ## Running
 
-Transform data from file ``<my-csv-file.csv>``  for station ``<wigos_station_identifier>`` to BUFR using template 
-specified in file ``<csv-to-bufr-mapping.json>`` and with station metadata file the file ``<metadata-file.csv>``. 
-Write output to ``<output-directory-path>``.
+Transform data from file `<my-csv-file.csv>` to BUFR using the mapping template
+specified in `<csv-to-bufr-mapping.json>`. Write output files to `<output-directory-path>`.
 
 ```bash
 csv2bufr data transform <my-csv-file.csv> \
-    <wigos_station_identifier> \
-    --station-metadata <metadata-file.csv> \
     --bufr-template <csv-to-bufr-mapping.json> \
-    --output <output-directory-path>
+    --output-dir <output-directory-path>
 ```
 
 ## Releasing

@@ -13,9 +13,9 @@ The ecCodes keys for the different elements are also shown as these are used to 
 The non-highlighted elements (including those without an ecCodes key) are either set by the eccodes module based on the data,
 have a default value or can be omitted / set to missing.
 
-The information cotained in Sections 0, 1, and 3 are essentially metadata specifying:
+The information contained in Sections 0, 1, and 3 are essentially metadata specifying:
 
-* the version of the BUFR tables used (:redtext:`editionNumber, masterTableNumber, masterTableVersionNumber`);
+* the version of the BUFR tables used (:redtext:`edition, masterTableNumber, masterTablesVersionNumber`);
 * where the data have come from (:redtext:`bufrHeaderCentre, bufrHeaderSubCentre`);
 * the typical time of the observation (:redtext:`typicalYear ... typicalSecond`);
 * the type of data and what parameters are included (:redtext:`dataCategory, internationalDataSubCategory and unexpandedDescriptors`).
@@ -37,7 +37,7 @@ The typical time of observation (:redtext:`typicalYear ... typicalSecond`) shoul
 encoded.
 Within the csv2bufr module and CLI only a single observation / weather report is encoded per file and so these should
 be set to those columns in the CSV specifying the year, month, day etc.
-More information is provided in the page on the BUFR template mapping (:redtext:`link to follow`).
+More information is provided in the page on the :ref:`BUFR template mapping <mapping>`.
 
 The :redtext:`data category` should be set according to BUFR Table A, i.e. 0 for "Surface data - land" and 1 for "Surface data - sea".
 The :redtext:`international data sub category` should be set according to Common Code Table C-13.
