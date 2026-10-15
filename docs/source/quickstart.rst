@@ -44,9 +44,13 @@ Input CSV file
 Currently, a single station per file is supported with each row treated as a separate record and one BUFR file per record created.
 The format of the input CSV file has a few requirements:
 
-- A comma (i.e. ``,``) must be used as the delimiter.
-- Strings must be quoted.
-- Missing values must be encoded as "None".
+- By default a comma (i.e. ``,``) is used as the delimiter. The template can set ``delimiter`` to ``;``, ``|`` or tab.
+- By default (``quoting`` = ``QUOTE_NONNUMERIC``) strings must be quoted, as every unquoted value is read as a number.
+  The template can change this with ``quoting`` and ``quotechar`` (see :ref:`mapping`).
+- Missing values should be left empty (e.g. ``1.5,,3.2``). ``NA``, ``NaN``, ``NAN`` and ``None`` are also treated as missing,
+  as is the value of the ``CSV2BUFR_MISSING_VALUE`` environment variable if set (a number, e.g. ``-999``, is compared as a number,
+  quoted or not). With the default quoting ``NA`` and ``None`` must be quoted (e.g. ``"NA"``): unquoted, they stop the file being read.
+- Non-ASCII values are set to missing with a warning; the rest of the row is still encoded.
 - The final row in the file must contain data and not be a new line.
 - The timestamp of the records must be separated into components, i.e. year, month, day etc must each be in a separate column.
 - The date/time elements should be in Universal Time Coordinated (UTC).
@@ -102,7 +106,7 @@ The command line interface uses the ``transform`` function from the csv2bufr mod
 The ``transform`` function returns an iterator that can be used to iterate over each line in the data file.
 Each item returned contains a dictionary with the following elements:
 
-- ``item["bufr4"]`` binary BUFR data
+- ``item["bufr4"]`` binary BUFR data (``None`` if encoding failed)
 - ``item["_meta"]`` GeoJSON dictionary containing metadata elements
 - ``item["_meta"]["id"]`` identifier for result (set combination of ``wigos_station_identifier`` and ``datetime``)
 - ``item["_meta"]["geometry"]`` GeoJSON geometry object of location of data

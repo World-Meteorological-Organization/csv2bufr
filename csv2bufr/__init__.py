@@ -28,6 +28,7 @@ import hashlib
 from io import StringIO, BytesIO
 import json
 import logging
+import math
 import os.path
 from contextvars import ContextVar
 from typing import Any, Iterator, Union
@@ -130,6 +131,59 @@ QUOTECHAR = '"'
 # error creating internal BytesIO for BUFR
 # error scaling data
 # error validating data
+
+
+def _missing_numbers(missing: list) -> set:
+    """
+    Returns the entries in a list of missing values that are numbers (e.g.
+    the value of CSV2BUFR_MISSING_VALUE), as floats.
+
+    :param missing: list of missing values, e.g. MISSING
+
+    :returns: `set` of floats
+    """
+    numbers = set()
+    for m in missing:
+        if isinstance(m, str):
+            try:
+                number = float(m)
+            except ValueError:
+                continue
+            if not math.isnan(number):
+                numbers.add(number)
+    return numbers
+
+
+def _is_missing(value: Any) -> bool:
+    """
+    Checks whether a value is missing. As well as the entries in MISSING, a
+    number (or a string holding a number) equal to a numeric entry in
+    MISSING is missing, as is a float NaN. With QUOTE_NONNUMERIC the csv
+    reader returns unquoted values as floats, so e.g. -999 in the file must
+    match a CSV2BUFR_MISSING_VALUE of "-999".
+
+    :param value: value to check
+
+    :returns: `bool`, True if the value is missing
+    """
+    missing = MISSING
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value in missing
+    if isinstance(value, (int, float)):
+        if math.isnan(value):
+            return True
+        return float(value) in _missing_numbers(missing)
+    if isinstance(value, str):
+        if value in missing:
+            return True
+        try:
+            number = float(value)
+        except ValueError:
+            return False
+        return number in _missing_numbers(missing)
+    return value in missing
 
 
 # function to find position in array of requested element
@@ -444,6 +498,7 @@ class BUFRMessage:
         for key in self.dict:
             self.dict[key]["value"] = None
         self.bufr = None
+        self._hash = None
         self.warnings = []
 
     def set_element(self, key: str, value: object) -> None:
@@ -522,9 +577,15 @@ class BUFRMessage:
         :param use_cached: Boolean indicating whether to use cached value
 
         :returns: bytes containing BUFR data
+
+        :raises: RuntimeError if the message cannot be encoded or packed
         """
         if use_cached and (self.bufr is not None):
             return self.bufr
+        # don't leave a previous message's bytes or hash cached if encoding
+        # fails
+        self.bufr = None
+        self._hash = None
         # ===========================
         # initialise new BUFR message
         # ===========================
@@ -583,11 +644,9 @@ class BUFRMessage:
         try:
             codes_set(bufr_msg, "pack", True)
         except CodesInternalError as e:
-            msg = f"Error ({e}) calling codes_set({bufr_msg}, 'pack', True). Null message returned"  # noqa
-            LOGGER.warning(f"{msg}")  # noqa
-            self.warnings.append(f"{msg}")  # noqa
+            msg = f"Error ({e}) calling codes_set({bufr_msg}, 'pack', True)"  # noqa
             codes_release(bufr_msg)
-            return self.bufr
+            raise RuntimeError(msg)
         except Exception as e:
             msg = f"Error ({e}) calling codes_set({bufr_msg}, 'pack', True)"
             # LOGGER.error(f"{msg}") # noqa
@@ -648,7 +707,7 @@ class BUFRMessage:
                 eccodes_key = element["eccodes_key"]
                 # get value
                 value = get_(eccodes_key, mappings[section], data)
-                if value in MISSING:
+                if _is_missing(value):
                     value = None
                 else:
                     # convert to expected data type
@@ -687,7 +746,7 @@ class BUFRMessage:
                 # ===================================
                 # now apply specified scaling to data
                 # ===================================
-                if value in MISSING:
+                if _is_missing(value):
                     value = None
                 else:
                     scale = None
@@ -775,7 +834,33 @@ def transform(data: str, mappings: dict) -> Iterator[dict]:
 
     :returns: iterator
     """
-    _warnings_var.set([])
+    rows = _transform(data, mappings)
+    try:
+        while True:
+            # set the warnings only while csv2bufr code runs, not while the
+            # caller handles a result. They are set and reset within one
+            # step, as the caller may advance the iterator from a different
+            # context (e.g. asyncio.to_thread)
+            token = _warnings_var.set([])
+            try:
+                result = next(rows)
+            except StopIteration:
+                return
+            finally:
+                _warnings_var.reset(token)
+            yield result
+    finally:
+        rows.close()
+
+
+def _transform(data: str, mappings: dict) -> Iterator[dict]:
+    """
+    Implements `transform`, see there for details.
+
+    Warnings are collected per row in `_warnings_var`. It is set here but not
+    reset: `transform` resets it after each step, so no token is held across
+    a yield.
+    """
     # ======================
     # validate mapping files
     # ======================
@@ -900,22 +985,23 @@ def transform(data: str, mappings: dict) -> Iterator[dict]:
 
     # now iterate over remaining rows
     for row in reader:
-        token = _warnings_var.set([])
+        _warnings_var.set([])
         wsi = None
         result = dict()
-        # check and make sure we have ascii data
-        for val in row:
+        # check and make sure we have ascii data, non ASCII values are set to
+        # missing, the rest of the row is still encoded
+        for idx, val in enumerate(row):
             if isinstance(val, str):
                 if not val.isascii():
                     if NULLIFY_INVALID:
-                        msg = f"csv read error, non ASCII data detected ({val}), skipping row"  # noqa
+                        msg = f"csv read error, non ASCII data detected ({val}), value set to missing"  # noqa
                         _collect_warning(msg)
                         LOGGER.debug(row)
-                        continue
+                        row[idx] = None
                     else:
                         msg = f"csv read error, non ASCII data detected ({val})"  # noqa
                         raise ValueError(msg)
-        # valid data row, make dictionary
+        # make dictionary
         data_dict = dict(zip(col_names, row))
         # parse and split WSI
         try:
@@ -1012,10 +1098,7 @@ def transform(data: str, mappings: dict) -> Iterator[dict]:
 
         time_ = datetime.now(timezone.utc).isoformat()
         LOGGER.info(f"{time_}|{result['_meta']}")
-        try:
-            # now yield result back to caller
-            yield result
-        finally:
-            _warnings_var.reset(token)
+        # now yield result back to caller
+        yield result
 
     fh.close()
