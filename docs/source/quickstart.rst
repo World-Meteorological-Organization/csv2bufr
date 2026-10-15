@@ -41,7 +41,7 @@ The output BUFR files can be validated using a tool such as the `ECMWF BUFR vali
 Input CSV file
 --------------
 
-Currently, a single station per file is supported with each row treated as a separate record and one BUFR file per record created.
+Each row is treated as a separate record and one BUFR file per record created.
 The format of the input CSV file has a few requirements:
 
 - By default a comma (i.e. ``,``) is used as the delimiter. The template can set ``delimiter`` to ``;``, ``|`` or tab.
@@ -112,11 +112,19 @@ Each item returned contains a dictionary with the following elements:
 - ``item["_meta"]["geometry"]`` GeoJSON geometry object of location of data
 - ``item["_meta"]["properties"]`` key/value pairs of properties/attributes
 - ``item["_meta"]["properties"]["md5"]`` the md5 checksum of the encoded BUFR data
-- ``item["_meta"]["properties"]["wigos_station_identifier"]`` WIGOS station identifier
+- ``item["_meta"]["properties"]["wigos_station_identifier"]`` WIGOS station identifier (``None`` for a failed row)
 - ``item["_meta"]["properties"]["datetime"]`` characteristic date of data contained in result (from BUFR)
 - ``item["_meta"]["properties"]["originating_centre"]`` originating centre for data (from BUFR)
 - ``item["_meta"]["properties"]["data_category"]`` data category (from BUFR)
+- ``item["_meta"]["properties"]["template"]`` template used for the conversion: ``label``, ``version`` and ``id`` from the
+  template ``metadata``. Only present if ``transform`` is called with ``include_provenance=True`` or, by default, if the
+  ``CSV2BUFR_INCLUDE_PROV`` environment variable is set to ``True``. It is then set for failed rows too, so errors can be
+  traced to the exact template version (see :ref:`mapping`)
 - ``item["_meta"]["result"]`` encoding status dictionary
 - ``item["_meta"]["result"]["code"]`` 1 if encoding succeeded, 0 if it failed
+- ``item["_meta"]["result"]["message"]`` summary message
 - ``item["_meta"]["result"]["errors"]`` list of error messages (empty on success)
 - ``item["_meta"]["result"]["warnings"]`` list of non-fatal warnings (e.g. values set to missing due to failed validation)
+
+Log messages written by csv2bufr while processing a row, and the messages of exceptions raised by the iterator
+(e.g. an invalid template or WIGOS station identifier), start with ``[template <id>]``.

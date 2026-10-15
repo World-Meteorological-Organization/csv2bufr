@@ -128,6 +128,8 @@ def transform(ctx, csv_file, mapping, output_dir, verbosity):  # noqa
         except Exception as err:
             raise click.ClickException(err)
 
+    click.echo(f"CLI:\t... Using template {c2bt.describe_template(mappings)}")  # noqa
+
     try:
         result = transform_csv(csv_file.read(), mappings)
     except Exception as err:

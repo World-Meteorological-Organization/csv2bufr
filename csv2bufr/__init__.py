@@ -60,6 +60,11 @@ if 'CSV2BUFR_NULLIFY_INVALID' in os.environ:
 else:
     NULLIFY_INVALID = True
 
+# include the template used in _meta.properties (off by default, as extra
+# properties may break downstream consumers)
+INCLUDE_PROV = os.environ.get(
+    "CSV2BUFR_INCLUDE_PROV", "False").lower() in ("true", "1", "yes")
+
 LOGGER = logging.getLogger(__name__)
 
 BUFR_TABLE_VERSION = os.environ.get("BUFR_TABLE_VERSION", 41)  # noqa default BUFR table version
@@ -98,6 +103,29 @@ DEFAULTS = {
 }
 
 _warnings_var: ContextVar[list] = ContextVar('_warnings', default=None)
+# template in use, set by transform() only while a row is being processed
+_template_var: ContextVar[dict] = ContextVar('_template', default=None)
+
+
+class _TemplateLogFilter(logging.Filter):
+    """
+    Prefixes log messages with the id of the template in use, so that
+    warnings and errors can be traced back to the template.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        template = _template_var.get(None)
+        if template is not None:
+            prefix = f"[template {template['id']}] "
+            if record.args:
+                prefix = prefix.replace("%", "%%")
+            record.msg = f"{prefix}{record.msg}"
+        return True
+
+
+# logger filters only apply to records logged on that logger, so add the
+# filter to the templates logger too
+for _logger in (LOGGER, c2bt.LOGGER):
+    _logger.addFilter(_TemplateLogFilter())
 
 
 def _collect_warning(msg: str) -> None:
@@ -796,7 +824,15 @@ class BUFRMessage:
         )
 
 
-def transform(data: str, mappings: dict) -> Iterator[dict]:
+def _exception_message(e: Exception) -> str:
+    # str(KeyError) adds quotes, so use the argument where there is just one
+    if len(e.args) == 1:
+        return str(e.args[0])
+    return str(e)
+
+
+def transform(data: str, mappings: dict,
+              include_provenance: bool = None) -> Iterator[dict]:
     """
     This function returns an iterator to process each line in the input CSV
     string. On each iteration a dictionary is returned containing the BUFR
@@ -808,22 +844,39 @@ def transform(data: str, mappings: dict) -> Iterator[dict]:
 
     The dictionary returned by the iterator contains the following keys:
 
-        - ["bufr4"] = data encoded into BUFR;
-        - ["_meta"] = GeoJSON metadata on the data.
+        - ["bufr4"] = data encoded into BUFR (None if encoding failed);
+        - ["_meta"] = GeoJSON-like metadata on the data (a Feature, with
+          additional keys).
 
-    The ["_meta"] element includes the following:
+    One result is returned per row and ["_meta"] contains:
 
-        - ["id"] = identifier for report (WIGOS_<WSI>_<ISO8601>);
-        - ["geometry"] = GeoJSON geometry object;
-        - ["properties"] = key/value pairs of properties/attributes
+        - ["id"] = identifier for the report (WIGOS_<WSI>_<ISO8601>);
+        - ["geometry"] = GeoJSON Point of the location;
+        - ["properties"]:
+            - ["md5"] = md5 checksum of the BUFR encoded data;
+            - ["wigos_station_identifier"] = WIGOS station identifier;
+            - ["datetime"] = typical date/time, from the Section 1 header;
+            - ["originating_centre"] = originating centre (see Common code
+              table C11);
+            - ["data_category"] = category of data (see BUFR Table A);
+            - ["template"] = template used, with keys "label", "version"
+              and "id" (from the template metadata). Only included if
+              include_provenance is True (by default, if the
+              CSV2BUFR_INCLUDE_PROV environment variable is set to True).
+              Set for rows that fail to encode as well as for those that
+              succeed;
+        - ["result"]:
+            - ["code"] = PASSED or FAILED;
+            - ["message"] = summary message;
+            - ["errors"] = list of errors (empty on success);
+            - ["warnings"] = list of warnings.
 
-    The ["_meta"]["properties"] element includes the following:
+    A failed result has ["bufr4"] None and the ["_meta"] values None, apart
+    from the template and ["result"].
 
-        - ["md5"] = md5 checksum of BUFR encoded data;
-        - ["wigos_station_identifier"] = WIGOS identifier;
-        - ["datetime"] = characteristic date of data;
-        - ["originating_centre"] = Originating centre (see Common code table C11);  # noqa
-        - ["data_category"] = Category of data, see BUFR Table A.
+    Log messages from csv2bufr while a row is processed are prefixed with
+    "[template <id>]", as are the messages of exceptions raised from the
+    iterator (e.g. invalid template or WIGOS station identifier).
 
     :param data: string containing csv separated data. First line should
                 contain the column headers, second line the data
@@ -831,31 +884,52 @@ def transform(data: str, mappings: dict) -> Iterator[dict]:
     :param mappings: dictionary containing list of BUFR elements to
                     encode (specified using ecCodes key) and whether
                     to get the value from (fixed, csv or metadata)
+    :param include_provenance: whether to add the template to
+                               ["_meta"]["properties"], defaults to the
+                               CSV2BUFR_INCLUDE_PROV environment variable
 
     :returns: iterator
     """
-    rows = _transform(data, mappings)
+    if include_provenance is None:
+        include_provenance = INCLUDE_PROV
+    template = c2bt.template_info(mappings)
+    LOGGER.info(f"Using template {c2bt.describe_template(mappings)}")
+    provenance = {"template": dict(template)} if include_provenance else {}
+    rows = _transform(data, mappings, provenance)
     try:
         while True:
-            # set the warnings only while csv2bufr code runs, not while the
-            # caller handles a result. They are set and reset within one
-            # step, as the caller may advance the iterator from a different
-            # context (e.g. asyncio.to_thread)
-            token = _warnings_var.set([])
+            # set the template and warnings only while csv2bufr code runs,
+            # not while the caller handles a result. Both are set and reset
+            # within one step, as the caller may advance the iterator from a
+            # different context (e.g. asyncio.to_thread)
+            token = _template_var.set(template)
+            warnings_token = _warnings_var.set([])
             try:
                 result = next(rows)
             except StopIteration:
                 return
+            except Exception as e:
+                msg = f"[template {template['id']}] {_exception_message(e)}"
+                try:
+                    err = type(e)(msg)
+                except Exception:
+                    raise e
+                raise err from e
             finally:
-                _warnings_var.reset(token)
+                _warnings_var.reset(warnings_token)
+                _template_var.reset(token)
             yield result
     finally:
         rows.close()
 
 
-def _transform(data: str, mappings: dict) -> Iterator[dict]:
+def _transform(data: str, mappings: dict,
+               provenance: dict) -> Iterator[dict]:
     """
     Implements `transform`, see there for details.
+
+    :param provenance: added to ["_meta"]["properties"] of each result,
+                       {"template": ...} or empty
 
     Warnings are collected per row in `_warnings_var`. It is set here but not
     reset: `transform` resets it after each step, so no token is held across
@@ -1064,7 +1138,8 @@ def _transform(data: str, mappings: dict) -> Iterator[dict]:
                     "wigos_station_identifier": wsi,
                     "datetime": message.get_datetime(),
                     "originating_centre": message.get_element("bufrHeaderCentre"),  # noqa
-                    "data_category": message.get_element("dataCategory")
+                    "data_category": message.get_element("dataCategory"),
+                    **provenance
                 },
                 "result": status
             }
@@ -1091,7 +1166,8 @@ def _transform(data: str, mappings: dict) -> Iterator[dict]:
                     "wigos_station_identifier": None,
                     "datetime": None,
                     "originating_centre": None,
-                    "data_category": None
+                    "data_category": None,
+                    **provenance
                 },
                 "result": status
             }
