@@ -21,16 +21,20 @@
 
 import asyncio
 import contextvars
+import copy
 import csv
+import json
 import os
 
 from io import StringIO
+from types import SimpleNamespace
 from unittest import mock
 import logging
 
 from eccodes import (codes_bufr_new_from_samples, codes_release,
                      codes_new_from_message, codes_set, codes_get,
                      codes_get_array, CODES_MISSING_DOUBLE)
+import jsonschema
 import pytest
 
 import csv2bufr
@@ -191,6 +195,116 @@ def test_validate_mapping_fail():
     assert success != SUCCESS
 
 
+@pytest.fixture
+def mapping_dict_v4(mapping_dict):
+    mapping = copy.deepcopy(mapping_dict)
+    mapping["conformsTo"] = ["csv2bufr-template-v4.json"]
+    # set by csv2bufr for v4 templates
+    mapping["header"] = [h for h in mapping["header"]
+                         if h["eccodes_key"] not in
+                         ("numberOfSubsets", "compressedData")]
+    mapping["metadata"]["references"] = [
+        {"title": "Manual on Codes (WMO-No. 306), Volume I.2",
+         "edition": "2023"}
+    ]
+    mapping["metadata"]["history"] = [
+        {"version": "1", "id": "99cad042-a73d-40a9-a646-cf140612394d",
+         "date": "2023-09-01", "editor": "pytest",
+         "changes": "Initial version."},
+        {"version": "2", "id": "eb37ac4f-13ce-4254-b372-5c1d097ea857",
+         "date": "2024-01-12", "editor": "pytest",
+         "changes": "Second version.", "references": ["B/C1"]}
+    ]
+    return mapping
+
+
+def test_schema_version(mapping_dict, mapping_dict_v4):
+    assert c2bt.schema_version(mapping_dict) == "csv2bufr-template-v3.json"
+    assert c2bt.schema_version(mapping_dict_v4) == "csv2bufr-template-v4.json"  # noqa
+    # highest supported version is used, unknown versions are ignored
+    mapping_dict["conformsTo"] = ["csv2bufr-template-v4.json",
+                                  "csv2bufr-template-v2.json",
+                                  "csv2bufr-template-v9.json"]
+    assert c2bt.schema_version(mapping_dict) == "csv2bufr-template-v4.json"
+    # conformsTo may be a string
+    mapping_dict["conformsTo"] = "csv2bufr-template-v2.json"
+    assert c2bt.schema_version(mapping_dict) == "csv2bufr-template-v2.json"
+    # nothing supported, fall back to the default
+    mapping_dict["conformsTo"] = []
+    assert c2bt.schema_version(mapping_dict) == c2bt.DEFAULT_SCHEMA
+
+
+def test_validate_v2_v3_pass(mapping_dict):
+    assert c2bt.validate_template(mapping_dict) == SUCCESS
+    mapping_dict["conformsTo"] = ["csv2bufr-template-v2.json"]
+    assert c2bt.validate_template(mapping_dict) == SUCCESS
+
+
+def test_validate_v4_pass(mapping_dict_v4):
+    assert c2bt.validate_template(mapping_dict_v4) == SUCCESS
+
+
+def test_validate_v4_history_mismatch_fails(mapping_dict_v4):
+    mapping_dict_v4["metadata"]["history"][-1]["version"] = "3"
+    with pytest.raises(RuntimeError, match="does not match metadata"):
+        c2bt.validate_template(mapping_dict_v4)
+
+
+def test_validate_v4_duplicate_history_ids_fails(mapping_dict_v4):
+    history = mapping_dict_v4["metadata"]["history"]
+    history[0]["id"] = history[1]["id"]
+    with pytest.raises(RuntimeError, match="duplicate ids"):
+        c2bt.validate_template(mapping_dict_v4)
+
+
+@pytest.mark.parametrize("field, value", [
+    ("id", "not-a-uuid"),
+    ("dateCreated", "2023-13-01")
+])
+def test_validate_v4_formats_checked(mapping_dict_v4, field, value):
+    mapping_dict_v4["metadata"][field] = value
+    with pytest.raises(RuntimeError):
+        c2bt.validate_template(mapping_dict_v4)
+
+
+def test_validate_v4_reference_requires_title(mapping_dict_v4):
+    mapping_dict_v4["metadata"]["references"] = [{"edition": "2023"}]
+    with pytest.raises(RuntimeError):
+        c2bt.validate_template(mapping_dict_v4)
+
+
+def test_validate_v3_problems_warn_only(mapping_dict_v4, caplog):
+    # the same problems only warn when the template declares v3
+    mapping_dict_v4["conformsTo"] = ["csv2bufr-template-v3.json"]
+    mapping_dict_v4["metadata"]["id"] = "not-a-uuid"
+    mapping_dict_v4["metadata"]["history"][-1]["version"] = "3"
+    assert c2bt.validate_template(mapping_dict_v4) == SUCCESS
+    assert "does not match metadata" in caplog.text
+
+
+@pytest.mark.parametrize("key", ["numberOfSubsets", "compressedData"])
+def test_validate_v4_automatic_header_keys_not_allowed(mapping_dict,
+                                                       mapping_dict_v4, key):
+    mapping_dict_v4["header"].append({"eccodes_key": key, "value": "const:1"})
+    with pytest.raises(RuntimeError, match=f"{key} set by csv2bufr"):
+        c2bt.validate_template(mapping_dict_v4)
+    # still allowed for v2/v3
+    assert any(h["eccodes_key"] == key for h in mapping_dict["header"])
+    assert c2bt.validate_template(mapping_dict) == SUCCESS
+
+
+def test_schema_v4_automatic_header_keys_not_allowed(mapping_dict_v4):
+    # also rejected by the schema itself, for other validators
+    with open(f"{c2bt.SCHEMA}/csv2bufr-template-v4.json") as fh:
+        schema = json.load(fh)
+    jsonschema.validate(mapping_dict_v4, schema)
+    for key in ("numberOfSubsets", "compressedData"):
+        mapping = copy.deepcopy(mapping_dict_v4)
+        mapping["header"].append({"eccodes_key": key, "value": "const:1"})
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(mapping, schema)
+
+
 # test to make sure apply_scaling works as expected
 def test_apply_scaling():
     scale = 1
@@ -227,54 +341,6 @@ def test_validate_value_nullify():
     except Exception:
         assert False
     assert value is None
-
-
-# check that test transform works
-def test_transform(data_dict, mapping_dict):
-    # create CSV
-    output = StringIO()
-    writer = csv.DictWriter(output, quoting=csv.QUOTE_NONNUMERIC,
-                            fieldnames=data_dict.keys())
-    writer.writeheader()
-    writer.writerow(data_dict)
-    data = output.getvalue()
-
-    result = transform(data, mapping_dict)
-
-    for item in result:
-        assert isinstance(item, dict)
-        assert "_meta" in item
-
-        item_meta_keys = ['geometry', 'id', 'properties', 'result']
-
-        item_meta_properties_keys = ['data_category', 'datetime',
-                                     'md5', 'originating_centre',
-                                     'wigos_station_identifier']
-
-        assert sorted(item["_meta"].keys()) == item_meta_keys
-        assert sorted(item["_meta"]["properties"].keys()) == item_meta_properties_keys  # noqa
-        assert item["_meta"]["properties"]["md5"] == "981938dbd97be3e5adc8e7b1c6eb642c"  # noqa
-
-
-def to_csv(rows):
-    output = StringIO()
-    writer = csv.DictWriter(output, quoting=csv.QUOTE_NONNUMERIC,
-                            fieldnames=rows[0].keys())
-    writer.writeheader()
-    for row in rows:
-        writer.writerow(row)
-    return output.getvalue()
-
-
-def decode_values(bufr, key):
-    msg = codes_new_from_message(bufr)
-    try:
-        codes_set(msg, "unpack", 1)
-        return (codes_get(msg, "numberOfSubsets"),
-                codes_get(msg, "compressedData"),
-                list(codes_get_array(msg, key)))
-    finally:
-        codes_release(msg)
 
 
 # MISSING without CSV2BUFR_MISSING_VALUE
@@ -342,6 +408,108 @@ def test_bufr_message_failed_encode_clears_cache():
     message.reset()
     assert message.bufr is None
     assert message.md5() is None
+
+
+# check that test transform works
+def test_transform(data_dict, mapping_dict):
+    # create CSV
+    output = StringIO()
+    writer = csv.DictWriter(output, quoting=csv.QUOTE_NONNUMERIC,
+                            fieldnames=data_dict.keys())
+    writer.writeheader()
+    writer.writerow(data_dict)
+    data = output.getvalue()
+
+    result = transform(data, mapping_dict)
+
+    for item in result:
+        assert isinstance(item, dict)
+        assert "_meta" in item
+
+        item_meta_keys = ['geometry', 'id', 'properties', 'result']
+
+        item_meta_properties_keys = ['data_category', 'datetime',
+                                     'md5', 'originating_centre',
+                                     'wigos_station_identifier']
+
+        assert sorted(item["_meta"].keys()) == item_meta_keys
+        assert sorted(item["_meta"]["properties"].keys()) == item_meta_properties_keys  # noqa
+        assert item["_meta"]["properties"]["md5"] == "981938dbd97be3e5adc8e7b1c6eb642c"  # noqa
+
+
+@pytest.fixture
+def template_info():
+    return {"label": "pytest", "version": "2",
+            "id": "eb37ac4f-13ce-4254-b372-5c1d097ea857"}
+
+
+def to_csv(rows):
+    output = StringIO()
+    writer = csv.DictWriter(output, quoting=csv.QUOTE_NONNUMERIC,
+                            fieldnames=rows[0].keys())
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return output.getvalue()
+
+
+def test_transform_template_provenance(data_dict, mapping_dict,
+                                       template_info, caplog):
+    caplog.set_level(logging.INFO)
+    results = list(transform(to_csv([data_dict]), mapping_dict,
+                             include_provenance=True))
+    assert results[0]["_meta"]["properties"]["template"] == template_info
+    assert "Using template 'pytest' version 2 (id eb37ac4f-13ce-4254-b372-5c1d097ea857)" in caplog.text  # noqa
+
+
+def test_transform_template_provenance_off_by_default(
+        data_dict, mapping_dict):
+    # assumes CSV2BUFR_INCLUDE_PROV is not set when the tests are run
+    results = list(transform(to_csv([data_dict]), mapping_dict))
+    assert "template" not in results[0]["_meta"]["properties"]
+    results = list(transform(to_csv([data_dict]), mapping_dict,
+                             include_provenance=False))
+    assert "template" not in results[0]["_meta"]["properties"]
+
+
+def test_transform_failed_row_has_template(data_dict, mapping_dict,
+                                           template_info):
+    # -999 K is out of the coding range for airTemperature, so encoding fails
+    data_dict["air_temperature"] = -999
+    results = list(transform(to_csv([data_dict]), mapping_dict,
+                             include_provenance=True))
+    assert results[0]["bufr4"] is None
+    assert results[0]["_meta"]["properties"]["template"] == template_info
+
+
+def test_transform_wsi_error_includes_template(data_dict, mapping_dict,
+                                               template_info):
+    mapping_dict["wigos_station_identifier"] = "data:no_such_column"
+    with pytest.raises(KeyError, match=f"\\[template {template_info['id']}\\]"):  # noqa
+        list(transform(to_csv([data_dict]), mapping_dict))
+
+
+def test_transform_invalid_template_includes_template(data_dict, mapping_dict,
+                                                      template_info):
+    del mapping_dict["header"]
+    with pytest.raises(RuntimeError, match=f"\\[template {template_info['id']}\\]"):  # noqa
+        list(transform(to_csv([data_dict]), mapping_dict))
+
+
+def test_transform_log_prefix(data_dict, mapping_dict, template_info, caplog):
+    prefix = f"[template {template_info['id']}]"
+    data_dict["note"] = "ok"
+    rows = [{**data_dict, "note": "ceäkes"}, data_dict]
+    results = transform(to_csv(rows), mapping_dict)
+    next(results)
+    # warnings logged while transforming carry the template id
+    assert f"{prefix} csv read error, non ASCII data detected" in caplog.text
+    # but the template is not set while the caller handles a result
+    assert csv2bufr._template_var.get() is None
+    LOGGER.warning("caller log")
+    assert caplog.records[-1].getMessage() == "caller log"
+    results.close()
+    assert csv2bufr._template_var.get() is None
 
 
 @pytest.fixture
@@ -443,6 +611,23 @@ def test_transform_non_ascii_not_nullified(data_dict, mapping_dict):
             list(transform(to_csv(rows), mapping_dict))
 
 
+def decode_values(bufr, key):
+    msg = codes_new_from_message(bufr)
+    try:
+        codes_set(msg, "unpack", 1)
+        return (codes_get(msg, "numberOfSubsets"),
+                codes_get(msg, "compressedData"),
+                list(codes_get_array(msg, key)))
+    finally:
+        codes_release(msg)
+
+
+def test_transform_v4_not_packed_uncompressed(data_dict, mapping_dict_v4):
+    r = list(transform(to_csv([data_dict]), mapping_dict_v4))[0]
+    subsets, compressed, _ = decode_values(r["bufr4"], "#1#airTemperature")
+    assert (subsets, compressed) == (1, 0)
+
+
 def test_templates():
     tmpl = c2bt.load_template('21327aac-46a6-437d-ae81-7a16a637dd2c')
     assert tmpl is not None
@@ -467,3 +652,102 @@ def test_templates():
 def test_load_template_by_name():
     tmpl = c2bt.load_template('aws-template')
     assert tmpl is not None
+
+
+@pytest.fixture
+def template_dirs(tmp_path, mapping_dict_v4):
+    """
+    Two empty template directories, searched in order (dirs), and a function
+    to write a template to one of the directories (write). While the test
+    runs, TEMPLATE_DIRS is dirs and TEMPLATES is empty; both are restored
+    afterwards.
+    """
+    dirs = [tmp_path / "first", tmp_path / "second"]
+    for dir_ in dirs:
+        dir_.mkdir()
+
+    def write(dir_index, name, id_, version="2",
+              conforms_to="csv2bufr-template-v4.json"):
+        tmpl = copy.deepcopy(mapping_dict_v4)
+        tmpl["conformsTo"] = [conforms_to]
+        tmpl["metadata"]["id"] = id_
+        tmpl["metadata"]["version"] = version
+        tmpl["metadata"]["history"][-1].update(id=id_, version=version)
+        path = dirs[dir_index] / f"{name}.json"
+        path.write_text(json.dumps(tmpl))
+        return str(path)
+
+    with mock.patch.object(c2bt, "TEMPLATE_DIRS", dirs), \
+            mock.patch.dict(c2bt.TEMPLATES, clear=True):
+        yield SimpleNamespace(dirs=dirs, write=write)
+
+
+ID_A = "11111111-1111-4111-8111-111111111111"
+ID_B = "22222222-2222-4222-8222-222222222222"
+
+
+def test_template_search_path_has_no_duplicates():
+    assert len(set(c2bt.TEMPLATE_DIRS)) == len(c2bt.TEMPLATE_DIRS)
+
+
+def test_index_duplicate_id_warns(template_dirs, caplog):
+    t = template_dirs
+    first = t.write(0, "a", ID_A)
+    second = t.write(1, "b", ID_A)
+    c2bt.index_templates()
+    assert c2bt.TEMPLATES[ID_A]["path"] == first
+    assert f"Duplicate template id {ID_A}: {second} ignored, using {first}" in caplog.text  # noqa
+
+
+def test_index_empty_id_not_indexed(template_dirs, caplog):
+    # v4 rejects an empty id as not a uuid, v2/v3 do not check the format
+    t = template_dirs
+    path = t.write(0, "a", "", conforms_to="csv2bufr-template-v3.json")
+    c2bt.index_templates()
+    assert c2bt.TEMPLATES == {}
+    assert f"Template {path} has no id, not indexed" in caplog.text
+    assert "Duplicate" not in caplog.text
+
+
+def test_index_missing_directory_skipped(template_dirs, tmp_path, caplog):
+    t = template_dirs
+    t.write(0, "a", ID_A)
+    t.dirs.insert(0, tmp_path / "missing")
+    c2bt.index_templates()
+    assert ID_A in c2bt.TEMPLATES
+    assert "not found, skipping" in caplog.text
+
+
+def test_load_template_by_id_gets_exact_version(template_dirs):
+    # two versions of a template side by side
+    t = template_dirs
+    t.write(0, "pytest-v1", ID_A, version="1")
+    t.write(0, "pytest-v2", ID_B, version="2")
+    c2bt.index_templates()
+    assert c2bt.load_template(ID_A)["metadata"]["version"] == "1"
+    assert c2bt.load_template(ID_B)["metadata"]["version"] == "2"
+
+
+def test_load_template_by_name_duplicates_warn(template_dirs, caplog):
+    t = template_dirs
+    first = t.write(0, "pytest", ID_A, version="1")
+    second = t.write(1, "pytest", ID_B, version="2")
+    c2bt.index_templates()
+    assert c2bt.load_template("pytest")["metadata"]["version"] == "1"
+    assert f"Several templates named 'pytest' found ({first}, {second}), using {first}" in caplog.text  # noqa
+
+
+def test_index_includes_provenance(template_dirs, mapping_dict_v4):
+    t = template_dirs
+    t.write(0, "a", ID_A)
+    c2bt.index_templates()
+    entry = c2bt.TEMPLATES[ID_A]
+    assert entry["references"] == mapping_dict_v4["metadata"]["references"]
+    assert [h["version"] for h in entry["history"]] == ["1", "2"]
+
+
+def test_load_template_logs_template(caplog):
+    caplog.set_level(logging.INFO)
+    tmpl = c2bt.load_template('aws-template')
+    path = c2bt.TEMPLATES[tmpl["metadata"]["id"]]["path"]
+    assert f"Using template {c2bt.describe_template(tmpl)} from {path}" in caplog.text  # noqa
