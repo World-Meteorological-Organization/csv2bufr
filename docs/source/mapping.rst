@@ -76,7 +76,9 @@ Changes from v3:
 
 - ``metadata.references`` and ``metadata.history`` added (optional).
 - ``metadata.id`` uses the standard ``uuid`` format (v3 used ``uuid4``, which validators do not recognise) and formats are enforced.
-- ``numberOfSubsets`` and ``compressedData`` must not be set in the ``header``: csv2bufr sets them.
+- ``pack_subsets``, ``pack_multiple_stations`` and ``on_row_error`` added (optional).
+- ``numberOfSubsets`` and ``compressedData`` must not be set in the ``header``: csv2bufr sets them
+  (uncompressed for one subset, compressed for several).
 
 See "Versions and provenance" in the
 `csv2bufr-templates contributing guide <https://github.com/World-Meteorological-Organization/csv2bufr-templates/blob/main/docs/source/contributing.rst>`_

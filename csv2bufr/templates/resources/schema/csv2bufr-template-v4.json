@@ -66,6 +66,25 @@
                 }
             }
         },
+        "pack_subsets": {
+            "type": "boolean",
+            "default": false,
+            "description": "Encode the rows of the input file for each station (WIGOS station identifier) as the subsets of one BUFR message, compressed if there is more than one subset"
+        },
+        "pack_multiple_stations": {
+            "type": "boolean",
+            "default": false,
+            "description": "When pack_subsets is true, encode the rows of all stations in one BUFR message rather than one message per station"
+        },
+        "on_row_error": {
+            "type": "string",
+            "enum": [
+                "skip",
+                "fail"
+            ],
+            "default": "skip",
+            "description": "When pack_subsets is true, what to do with a row that cannot be parsed: skip leaves the row out of its message with a warning, fail makes the whole message fail"
+        },
         "inputShortDelayedDescriptorReplicationFactor": {
             "type": "array",
             "items": {
@@ -132,7 +151,7 @@
                     }
                 ]
             },
-            "description": "Contents of header sections of BUFR message. numberOfSubsets and compressedData are set by csv2bufr and must not be set in the template"
+            "description": "Contents of header sections of BUFR message. numberOfSubsets and compressedData are set by csv2bufr (uncompressed for one subset, compressed for several) and must not be set in the template"
         },
         "data": {
             "type": "array",
