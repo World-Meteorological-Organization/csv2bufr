@@ -28,6 +28,80 @@ The following properties are optional:
 - ``delimiter`` - field separator character in the input CSV file; one of ``,`` (default), ``;``, ``|``, or tab
 - ``quoting`` - CSV quoting mode; one of ``QUOTE_NONNUMERIC`` (default), ``QUOTE_ALL``, ``QUOTE_MINIMAL``, or ``QUOTE_NONE``
 - ``quotechar`` - quote character used in the CSV file; default ``"``
+- ``pack_subsets`` (v4) - boolean, default ``false``. Encode the rows of each station in the input file as the subsets of one
+  BUFR message, instead of one message per row (see below).
+- ``pack_multiple_stations`` (v4) - boolean, default ``false``. With ``pack_subsets``, encode the rows of all the stations in
+  one message instead of one message per station.
+- ``on_row_error`` (v4) - ``skip`` (default) or ``fail``. When ``pack_subsets`` is ``true``, what to do with a row that cannot be parsed:
+  ``skip`` leaves the row out of its message and adds a warning, ``fail`` makes that message fail.
+
+Packing rows as subsets (v4)
+----------------------------
+
+With ``"pack_subsets": true`` the whole input file is read first, and the rows of each station (WIGOS station identifier)
+are encoded as one BUFR message with one subset per row. The file gives one result per station, in the order the stations
+first appear, so the rows can be sorted by station or by date. For example, a file holding a month of daily values for one
+station (DAYCLI) gives a single message.
+
+With ``"pack_multiple_stations": true`` as well, all the rows of the file are encoded as one message, whatever the station.
+
+- Each row must have a complete WIGOS station identifier (four non-empty parts) when packing by station. A row without one
+  cannot be assigned to a station and is returned as a failed result of its own (``on_row_error`` does not apply).
+- The Section 1 header values, including the typical date and time, are taken from the first row of the message.
+- ``numberOfSubsets`` and ``compressedData`` are set by csv2bufr (and must not be in a v4 template): the message is
+  compressed if it has more than one subset, and uncompressed otherwise.
+- The replication factors in the template apply to every subset. Values that are arrays (``array:``) are not supported in the data section.
+- Each result describes one message, with the same keys as a result without packing (a single row is a message
+  with one subset). For a packed message:
+
+  - ``_meta.id`` is ``WIGOS_<wigos_station_identifier>_<datetime>`` if the message has one station, otherwise ``BUFR_<md5>``;
+  - ``_meta.geometry`` is a ``Point`` if all the subsets have the same location, otherwise a ``Polygon`` of the bounding
+    box of the subset locations. If the locations cross the antimeridian (their longitude range is shorter through 180°
+    than through 0°), the geometry is worked out separately for each side and combined, e.g. as a ``MultiPolygon``
+    (as RFC 7946, section 3.1.9);
+  - ``_meta.properties.datetime`` is the typical date and time from the Section 1 header;
+  - ``_meta.properties.start_datetime`` and ``end_datetime`` are the earliest and latest times of the subsets, from their
+    ``#1#year``, ``#1#month``, ``#1#day``, ``#1#hour``, ``#1#minute`` and ``#1#second`` elements. A missing hour, minute or
+    second is taken as 0; a subset without a year, month or day (or with an invalid date) is left out.
+    If no subset has a time, both are the typical date and time;
+  - ``_meta.properties.wigos_station_identifier`` is the WIGOS station identifier if all the subsets are for one station
+    (always the case unless ``pack_multiple_stations`` is set), otherwise ``null``;
+  - ``_meta.properties.number_of_subsets`` is the number of subsets;
+  - ``_meta.properties.geometry_index`` is only present if the message has more than one station. It lists one entry, or
+    one for each side of the antimeridian, with its ``polygon``, bounding box ``bbox`` (``[west, south, east, north]``,
+    west greater than east across the antimeridian, RFC 7946 section 5.2), ``start_datetime``, ``end_datetime``,
+    ``subsets`` and ``wigos_station_identifiers``. The latter lists each station on that side, in the order they first
+    appear, with its ``wigos_station_identifier``, ``geometry``, ``bbox``, ``start_datetime``, ``end_datetime`` and
+    ``subsets``, e.g. to split the message into one per station. For example:
+
+    .. code-block:: json
+
+       "geometry_index": [
+         {"polygon": {"type": "Polygon", "coordinates": [...]},
+          "bbox": [10.0, 50.0, 12.0, 52.0],
+          "start_datetime": "2021-11-01T00:00:00", "end_datetime": "2021-11-02T00:00:00",
+          "subsets": [1, 2, 3],
+          "wigos_station_identifiers": [
+            {"wigos_station_identifier": "0-1-2-A",
+             "geometry": {"type": "Point", "coordinates": [10.0, 50.0]},
+             "bbox": [10.0, 50.0, 10.0, 50.0],
+             "start_datetime": "2021-11-01T00:00:00", "end_datetime": "2021-11-02T00:00:00",
+             "subsets": [1, 3]},
+            {"wigos_station_identifier": "0-1-2-B",
+             "geometry": {"type": "Point", "coordinates": [12.0, 52.0]},
+             "bbox": [12.0, 52.0, 12.0, 52.0],
+             "start_datetime": "2021-11-01T00:00:00", "end_datetime": "2021-11-01T00:00:00",
+             "subsets": [2]}
+          ]}
+       ]
+
+    ``subsets`` are the subset numbers in the message, from 1, so the subsets can be extracted with ecCodes, e.g.
+    ``extractSubsetList``. (Times are ``datetime`` objects, shown here as strings.)
+  - a failed result has the same keys, with ``start_datetime`` and ``end_datetime`` ``null`` and ``number_of_subsets`` 0.
+    The ``wigos_station_identifier`` is kept if the rows are for one station;
+  - the warnings in ``_meta.result`` start with the line number of the row in the file (e.g. ``row 5: ...``).
+- Non-ASCII values are set to missing with a warning and the rest of the row is encoded, as without packing.
+- ``pack_subsets`` is only applied to templates that conform to ``csv2bufr-template-v4.json``. For older templates it is ignored with a warning.
 
 Template provenance (v4)
 ------------------------

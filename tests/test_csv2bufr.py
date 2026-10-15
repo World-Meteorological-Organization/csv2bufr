@@ -26,6 +26,7 @@ import csv
 import json
 import os
 
+from datetime import datetime
 from io import StringIO
 from types import SimpleNamespace
 from unittest import mock
@@ -282,6 +283,30 @@ def test_validate_v3_problems_warn_only(mapping_dict_v4, caplog):
     assert "does not match metadata" in caplog.text
 
 
+def test_validate_pack_subsets(mapping_dict_v4):
+    mapping_dict_v4["pack_subsets"] = True
+    mapping_dict_v4["on_row_error"] = "fail"
+    assert c2bt.validate_template(mapping_dict_v4) == SUCCESS
+    mapping_dict_v4["on_row_error"] = "ignore"
+    with pytest.raises(RuntimeError):
+        c2bt.validate_template(mapping_dict_v4)
+    mapping_dict_v4["on_row_error"] = "skip"
+    mapping_dict_v4["pack_subsets"] = "yes"
+    with pytest.raises(RuntimeError):
+        c2bt.validate_template(mapping_dict_v4)
+
+
+def test_validate_pack_multiple_stations(mapping_dict_v4, caplog):
+    mapping_dict_v4["pack_multiple_stations"] = True
+    assert c2bt.validate_template(mapping_dict_v4) == SUCCESS
+    # ignored without pack_subsets
+    assert "pack_multiple_stations is ignored" in caplog.text
+    mapping_dict_v4["pack_subsets"] = True
+    mapping_dict_v4["pack_multiple_stations"] = "yes"
+    with pytest.raises(RuntimeError):
+        c2bt.validate_template(mapping_dict_v4)
+
+
 @pytest.mark.parametrize("key", ["numberOfSubsets", "compressedData"])
 def test_validate_v4_automatic_header_keys_not_allowed(mapping_dict,
                                                        mapping_dict_v4, key):
@@ -388,6 +413,16 @@ def test_transform_pack_failure_reported(data_dict, mapping_dict):
     assert "'pack'" in results[0]["_meta"]["result"]["errors"][0]
 
 
+def test_transform_pack_subsets_pack_failure_reported(multi_mapping,
+                                                      packed_rows):
+    packed_rows[0]["air_temperature"] = -999
+    results = list(transform(to_csv(packed_rows), multi_mapping))
+    assert len(results) == 1
+    assert results[0]["bufr4"] is None
+    assert results[0]["_meta"]["result"]["code"] == csv2bufr.FAILED
+    assert any("'pack'" in e for e in results[0]["_meta"]["result"]["errors"])  # noqa
+
+
 def test_bufr_message_failed_encode_clears_cache():
     message = csv2bufr.BUFRMessage([12101])
     message.set_element("edition", 4)
@@ -429,7 +464,9 @@ def test_transform(data_dict, mapping_dict):
         item_meta_keys = ['geometry', 'id', 'properties', 'result']
 
         item_meta_properties_keys = ['data_category', 'datetime',
-                                     'md5', 'originating_centre',
+                                     'end_datetime', 'md5',
+                                     'number_of_subsets',
+                                     'originating_centre', 'start_datetime',
                                      'wigos_station_identifier']
 
         assert sorted(item["_meta"].keys()) == item_meta_keys
@@ -611,6 +648,29 @@ def test_transform_non_ascii_not_nullified(data_dict, mapping_dict):
             list(transform(to_csv(rows), mapping_dict))
 
 
+@pytest.fixture
+def packed_mapping(mapping_dict_v4):
+    mapping_dict_v4["pack_subsets"] = True
+    mapping_dict_v4["wigos_station_identifier"] = "data:wsi"
+    return mapping_dict_v4
+
+
+@pytest.fixture
+def multi_mapping(packed_mapping):
+    packed_mapping["pack_multiple_stations"] = True
+    return packed_mapping
+
+
+@pytest.fixture
+def packed_rows(data_dict):
+    # two stations, interleaved, with different temperatures and times
+    return [
+        {**data_dict, "wsi": "0-1-2-A", "air_temperature": 280.1, "hour": 6},
+        {**data_dict, "wsi": "0-1-2-B", "air_temperature": 290.2, "hour": 6},
+        {**data_dict, "wsi": "0-1-2-A", "air_temperature": 281.3, "hour": 7}
+    ]
+
+
 def decode_values(bufr, key):
     msg = codes_new_from_message(bufr)
     try:
@@ -622,10 +682,330 @@ def decode_values(bufr, key):
         codes_release(msg)
 
 
+def test_transform_pack_subsets(packed_mapping, packed_rows, template_info):
+    results = list(transform(to_csv(packed_rows), packed_mapping,
+                             include_provenance=True))
+
+    # one message per station, in the order first seen
+    assert len(results) == 2
+    a, b = results
+    for r, wsi, n in ((a, "0-1-2-A", 2), (b, "0-1-2-B", 1)):
+        props = r["_meta"]["properties"]
+        assert props["wigos_station_identifier"] == wsi
+        assert "geometry_index" not in props  # one station
+        assert props["number_of_subsets"] == n
+        assert props["template"] == template_info
+        assert r["_meta"]["id"] == \
+            f"WIGOS_{wsi}_{props['datetime']:%Y%m%dT%H%M%S}"
+        assert r["_meta"]["geometry"] == {
+            "type": "Point", "coordinates": [0.0, 55.154]}
+    # typical date/time from the station's first row
+    assert a["_meta"]["properties"]["datetime"].hour == 6
+
+    subsets, compressed, temps = decode_values(a["bufr4"], "#1#airTemperature")  # noqa
+    assert (subsets, compressed) == (2, 1)
+    assert temps == pytest.approx([280.1, 281.3])
+    subsets, compressed, temps = decode_values(b["bufr4"], "#1#airTemperature")  # noqa
+    assert (subsets, compressed) == (1, 0)
+    assert temps == pytest.approx([290.2])
+
+
+@pytest.mark.parametrize("wsi", ["", "0-1-2-"])
+def test_transform_pack_subsets_incomplete_wsi(packed_mapping, packed_rows,
+                                               wsi):
+    packed_rows[1]["wsi"] = wsi
+    results = list(transform(to_csv(packed_rows), packed_mapping))
+    # the row fails on its own, the other station is still encoded
+    assert len(results) == 2
+    bad, a = results
+    assert bad["bufr4"] is None
+    assert bad["_meta"]["result"]["code"] == csv2bufr.FAILED
+    assert bad["_meta"]["result"]["errors"][0].startswith(
+        "row 3: incomplete WIGOS station identifier")
+    assert a["_meta"]["properties"]["number_of_subsets"] == 2
+
+
+def test_transform_pack_multiple_stations(multi_mapping, packed_rows,
+                                          template_info):
+    results = list(transform(to_csv(packed_rows), multi_mapping,
+                             include_provenance=True))
+
+    # all rows of the file in one message
+    assert len(results) == 1
+    r = results[0]
+    props = r["_meta"]["properties"]
+    assert props["number_of_subsets"] == 3
+    assert props["template"] == template_info
+    # several stations
+    assert props["wigos_station_identifier"] is None
+    assert [s["wigos_station_identifier"] for s in
+            props["geometry_index"][0]["wigos_station_identifiers"]] == \
+        ["0-1-2-A", "0-1-2-B"]
+    assert r["_meta"]["id"] == f"BUFR_{props['md5']}"
+    # all rows have the same location
+    assert r["_meta"]["geometry"] == {
+        "type": "Point", "coordinates": [0.0, 55.154]}
+    # typical date/time from the first row
+    assert props["datetime"].hour == 6
+
+    subsets, compressed, temps = decode_values(r["bufr4"], "#1#airTemperature")  # noqa
+    assert (subsets, compressed) == (3, 1)
+    assert temps == pytest.approx([280.1, 290.2, 281.3])
+
+
+def test_transform_pack_subsets_one_station(packed_mapping, packed_rows):
+    rows = [row for row in packed_rows if row["wsi"] == "0-1-2-A"]
+    r = list(transform(to_csv(rows), packed_mapping))[0]
+    props = r["_meta"]["properties"]
+    assert props["wigos_station_identifier"] == "0-1-2-A"
+    assert "geometry_index" not in props
+    assert props["number_of_subsets"] == 2
+
+
+def test_transform_pack_subsets_one_row_uncompressed(packed_mapping,
+                                                     packed_rows):
+    r = list(transform(to_csv(packed_rows[:1]), packed_mapping))[0]
+    subsets, compressed, temps = decode_values(r["bufr4"], "#1#airTemperature")  # noqa
+    assert (subsets, compressed) == (1, 0)
+    assert temps == pytest.approx([280.1])
+
+
 def test_transform_v4_not_packed_uncompressed(data_dict, mapping_dict_v4):
     r = list(transform(to_csv([data_dict]), mapping_dict_v4))[0]
     subsets, compressed, _ = decode_values(r["bufr4"], "#1#airTemperature")
     assert (subsets, compressed) == (1, 0)
+
+
+def test_transform_pack_subsets_geometry(multi_mapping, packed_rows):
+    locations = [(10.0, 50.0), (12.0, 50.0), (11.0, 52.0)]
+    for row, (lon, lat) in zip(packed_rows, locations):
+        row["longitude"], row["latitude"] = lon, lat
+    r = list(transform(to_csv(packed_rows), multi_mapping))[0]
+    # bounding box of the locations
+    assert r["_meta"]["geometry"] == {
+        "type": "Polygon",
+        "coordinates": [[[10.0, 50.0], [12.0, 50.0], [12.0, 52.0],
+                         [10.0, 52.0], [10.0, 50.0]]]}
+
+
+def test_geometry_point():
+    assert csv2bufr._geometry([(1.0, 2.0), (1.0, 2.0)]) == {
+        "type": "Point", "coordinates": [1.0, 2.0]}
+
+
+@pytest.mark.parametrize("points", [
+    [(0.0, 0.0), (2.0, 1.0)],  # two locations
+    [(0.0, 0.0), (1.0, 0.5), (2.0, 1.0)],  # on one line
+    [(0.0, 1.0), (2.0, 0.0), (1.0, 0.5), (None, None)]  # unknown left out
+])
+def test_geometry_bbox(points):
+    assert csv2bufr._geometry(points) == {
+        "type": "Polygon",
+        "coordinates": [[[0.0, 0.0], [2.0, 0.0], [2.0, 1.0], [0.0, 1.0],
+                         [0.0, 0.0]]]}
+
+
+def test_transform_pack_subsets_time_range(packed_mapping, packed_rows):
+    a = list(transform(to_csv(packed_rows), packed_mapping))[0]
+    props = a["_meta"]["properties"]
+    # typical date/time from the header, range from the subsets
+    assert props["datetime"] == datetime(2021, 11, 18, 6)
+    assert props["start_datetime"] == datetime(2021, 11, 18, 6)
+    assert props["end_datetime"] == datetime(2021, 11, 18, 7)
+
+
+def test_result_format_same_for_all_paths(data_dict, mapping_dict,
+                                          packed_mapping, packed_rows):
+    # a row on its own, a packed message of one station and of several
+    # stations have the same keys, apart from geometry_index (only with
+    # several stations)
+    multi_mapping = {**packed_mapping, "pack_multiple_stations": True}
+    single = list(transform(to_csv([data_dict]), mapping_dict))[0]
+    packed = list(transform(to_csv(packed_rows), packed_mapping))[0]
+    multi = list(transform(to_csv(packed_rows), multi_mapping))[0]
+    for r in (single, packed, multi):
+        assert r["_meta"]["result"]["code"] == csv2bufr.PASSED
+        assert sorted(r["_meta"]) == ["geometry", "id", "properties",
+                                      "result"]
+    keys = sorted(single["_meta"]["properties"])
+    assert sorted(packed["_meta"]["properties"]) == keys
+    assert sorted(multi["_meta"]["properties"]) == \
+        sorted(keys + ["geometry_index"])
+    assert single["_meta"]["properties"]["number_of_subsets"] == 1
+    assert single["_meta"]["id"].startswith("WIGOS_")
+
+
+def test_failed_result_format_same_for_all_paths(data_dict, mapping_dict,
+                                                 multi_mapping, packed_rows):
+    data_dict["air_temperature"] = -999  # fails to pack
+    single = list(transform(to_csv([data_dict]), mapping_dict))[0]
+    packed_rows[0]["air_temperature"] = -999
+    multi = list(transform(to_csv(packed_rows), multi_mapping))[0]
+    for r in (single, multi):
+        assert r["bufr4"] is None
+        assert r["_meta"]["result"]["code"] == csv2bufr.FAILED
+        assert r["_meta"]["properties"]["start_datetime"] is None
+        assert r["_meta"]["properties"]["number_of_subsets"] == 0
+    assert sorted(single["_meta"]["properties"]) == \
+        sorted(multi["_meta"]["properties"])
+    # the station is kept if there is one
+    assert single["_meta"]["properties"]["wigos_station_identifier"] == \
+        "0-1-2-ABCD"
+    assert multi["_meta"]["properties"]["wigos_station_identifier"] is None
+
+
+@pytest.mark.parametrize("subset, expected", [
+    ({"#1#year": 2021, "#1#month": 11, "#1#day": 18},
+     datetime(2021, 11, 18)),
+    ({"#1#year": 2021.0, "#1#month": 11.0, "#1#day": 18.0, "#1#hour": 6.0,
+      "#1#minute": None, "#1#second": 30.0},
+     datetime(2021, 11, 18, 6, 0, 30)),
+    ({"#1#year": 2021, "#1#month": 11, "#1#hour": 6}, None),  # no day
+    ({"#1#year": 2021, "#1#month": 2, "#1#day": 30}, None),  # not valid
+])
+def test_subset_datetime(subset, expected):
+    assert csv2bufr._subset_datetime(subset) == expected
+
+
+def test_time_range():
+    t1, t2 = datetime(2021, 1, 1), datetime(2021, 1, 2)
+    assert csv2bufr._time_range([t2, None, t1]) == (t1, t2)
+    assert csv2bufr._time_range([None], t1) == (t1, t1)
+
+
+@pytest.mark.parametrize("points, expected", [
+    ([(1.0, 2.0)], [1.0, 2.0, 1.0, 2.0]),
+    ([(10.0, 50.0), (12.0, 52.0), (None, None)], [10.0, 50.0, 12.0, 52.0]),
+    # crossing the antimeridian, west > east
+    ([(170.0, 10.0), (-170.0, 12.0), (175.0, 11.0)],
+     [170.0, 10.0, -170.0, 12.0]),
+    ([(None, None)], None)
+])
+def test_bbox(points, expected):
+    assert csv2bufr._bbox(points) == expected
+
+
+def test_transform_pack_multiple_stations_index(multi_mapping,
+                                                packed_rows):
+    locations = [(10.0, 50.0), (12.0, 50.0), (10.0, 50.0)]
+    for row, (lon, lat) in zip(packed_rows, locations):
+        row["longitude"], row["latitude"] = lon, lat
+    r = list(transform(to_csv(packed_rows), multi_mapping))[0]
+    props = r["_meta"]["properties"]
+    assert len(props["geometry_index"]) == 1
+    entry = props["geometry_index"][0]
+    assert [(s["wigos_station_identifier"], s["geometry"], s["bbox"],
+             s["subsets"]) for s in entry["wigos_station_identifiers"]] == [
+        ("0-1-2-A", {"type": "Point", "coordinates": [10.0, 50.0]},
+         [10.0, 50.0, 10.0, 50.0], [1, 3]),
+        ("0-1-2-B", {"type": "Point", "coordinates": [12.0, 50.0]},
+         [12.0, 50.0, 12.0, 50.0], [2])]
+    assert entry["subsets"] == [1, 2, 3]
+    assert entry["polygon"] == r["_meta"]["geometry"]
+    assert entry["bbox"] == [10.0, 50.0, 12.0, 50.0]
+
+
+def test_transform_pack_multiple_stations_antimeridian(multi_mapping,
+                                                       packed_rows):
+    packed_rows.append({**packed_rows[1], "wsi": "0-1-2-C"})
+    locations = [(170.0, 10.0), (-170.0, 10.0), (175.0, 12.0),
+                 (-175.0, 12.0)]
+    for row, (lon, lat) in zip(packed_rows, locations):
+        row["longitude"], row["latitude"] = lon, lat
+    r = list(transform(to_csv(packed_rows), multi_mapping))[0]
+    east, west = r["_meta"]["properties"]["geometry_index"]
+    assert east["subsets"] == [1, 3]
+
+    def stations(side):
+        return [(s["wigos_station_identifier"], s["subsets"])
+                for s in side["wigos_station_identifiers"]]
+
+    assert stations(east) == [("0-1-2-A", [1, 3])]
+    assert west["subsets"] == [2, 4]
+    assert stations(west) == [("0-1-2-B", [2]), ("0-1-2-C", [4])]
+    assert east["bbox"] == [170.0, 10.0, 175.0, 12.0]
+    assert west["bbox"] == [-175.0, 10.0, -170.0, 12.0]
+    # two locations each side, so bounding boxes
+    assert east["polygon"]["type"] == west["polygon"]["type"] == "Polygon"
+    assert r["_meta"]["geometry"] == {
+        "type": "MultiPolygon",
+        "coordinates": [east["polygon"]["coordinates"],
+                        west["polygon"]["coordinates"]]}
+
+
+@pytest.mark.parametrize("lons, groups", [
+    ([10.0, -10.0], [[0, 1]]),  # across 0, not split
+    ([100.0, -100.0, 0.0], [[0, 1, 2]]),  # shorter through 0
+    ([170.0, -170.0], [[0], [1]]),
+    ([None, -170.0, 170.0], [[0, 2], [1]])  # unknown goes east
+])
+def test_antimeridian_groups(lons, groups):
+    points = [(x, None if x is None else 0.0) for x in lons]
+    assert csv2bufr._antimeridian_groups(points) == groups
+
+
+def test_geometry_unknown_location():
+    assert csv2bufr._geometry([(None, None), (1.0, None)]) == {
+        "type": None, "coordinates": None}
+
+
+def test_transform_pack_subsets_missing_values(multi_mapping, packed_rows):
+    packed_rows[2]["air_temperature"] = ""
+    results = list(transform(to_csv(packed_rows), multi_mapping))
+    _, _, temps = decode_values(results[0]["bufr4"], "#1#airTemperature")
+    assert temps[:2] == pytest.approx([280.1, 290.2])
+    assert temps[2] == CODES_MISSING_DOUBLE
+
+
+def test_transform_pack_subsets_row_error_skip(multi_mapping, packed_rows):
+    packed_rows[0]["air_temperature"] = "abc"
+    results = list(transform(to_csv(packed_rows), multi_mapping))
+    a = results[0]
+    assert a["_meta"]["result"]["code"] == csv2bufr.PASSED
+    assert a["_meta"]["properties"]["number_of_subsets"] == 2
+    # stations of the rows in the message, in the order first seen
+    assert [s["wigos_station_identifier"] for s in
+            a["_meta"]["properties"]["geometry_index"][0]
+            ["wigos_station_identifiers"]] == ["0-1-2-B", "0-1-2-A"]
+    # skipped row is reported by its line number in the file (header = 1)
+    assert any(w.startswith("row 2: ") and w.endswith("row skipped")
+               for w in a["_meta"]["result"]["warnings"])
+    _, _, temps = decode_values(a["bufr4"], "#1#airTemperature")
+    assert temps == pytest.approx([290.2, 281.3])
+
+
+def test_transform_pack_subsets_row_error_fail(multi_mapping, packed_rows,
+                                               template_info):
+    multi_mapping["on_row_error"] = "fail"
+    packed_rows[0]["air_temperature"] = "abc"
+    results = list(transform(to_csv(packed_rows), multi_mapping,
+                             include_provenance=True))
+    assert len(results) == 1
+    a = results[0]
+    assert a["bufr4"] is None
+    assert a["_meta"]["result"]["code"] == csv2bufr.FAILED
+    assert a["_meta"]["result"]["errors"][0].startswith("row 2: ")
+    assert a["_meta"]["properties"]["template"] == template_info
+    # several stations, so none kept
+    assert a["_meta"]["properties"]["wigos_station_identifier"] is None
+
+
+def test_transform_pack_subsets_needs_v4(packed_mapping, packed_rows, caplog):
+    packed_mapping["conformsTo"] = ["csv2bufr-template-v3.json"]
+    results = list(transform(to_csv(packed_rows), packed_mapping))
+    assert len(results) == 3
+    assert "pack_subsets is not supported" in caplog.text
+
+
+def test_transform_pack_subsets_row_error_fail_per_station(packed_mapping,
+                                                           packed_rows):
+    packed_mapping["on_row_error"] = "fail"
+    packed_rows[0]["air_temperature"] = "abc"
+    a, b = list(transform(to_csv(packed_rows), packed_mapping))
+    # only the message of the station with the bad row fails
+    assert a["_meta"]["result"]["code"] == csv2bufr.FAILED
+    assert a["_meta"]["properties"]["wigos_station_identifier"] == "0-1-2-A"
+    assert b["_meta"]["result"]["code"] == csv2bufr.PASSED
 
 
 def test_templates():
