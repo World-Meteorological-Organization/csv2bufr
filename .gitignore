@@ -6,25 +6,25 @@
 # Packages
 *.egg
 *.egg-info
-dist
-build
-eggs
-parts
-bin
-var
-sdist
-develop-eggs
+dist/
+build/
+eggs/
+parts/
+bin/
+var/
+sdist/
+develop-eggs/
 .installed.cfg
-lib
-lib64
-__pycache__
+lib/
+lib64/
+__pycache__/
 
 # Installer logs
 pip-log.txt
 
 # Unit test / coverage reports
 .coverage
-.tox
+.tox/
 nosetests.xml
 
 # Translations
@@ -36,13 +36,57 @@ nosetests.xml
 .pydevproject
 
 # local
-.pytest_cache
+.pytest_cache/
 *.bufr4
 *.geojson
-logs
+logs/
 
-# pycharm
-.idea
+# IDEs
+.idea/
+.vscode/
+
+# AI agents
+.claude/
+.gemini/
+.aider*
+.cursor/
+.continue/
+.windsurf/
 
 # scratch directory
-scratch
+scratch/
+external/
+
+# virtual environments
+venv/
+.venv/
+env/
+
+# secrets and credentials - never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa*
+id_ed25519*
+.netrc
+.pypirc
+.npmrc
+.yarnrc.yml
+**/.docker/config.json
+.aws/
+.azure/
+**/.config/gcloud/
+*credentials*.json
+*service-account*.json
+
+# JS tooling
+node_modules/
+*.js
+*.ts
+*.jsx
+*.tsx
