@@ -4,12 +4,12 @@ on: [ push, pull_request ]
 
 jobs:
   main:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     container:
-      image: wmoim/dim_eccodes_baseimage:noble_eccodes-2.44
+      image: wmoim/dim_eccodes_baseimage:noble_eccodes-2.47
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
     - name: Install requirements 📦
       run: |
