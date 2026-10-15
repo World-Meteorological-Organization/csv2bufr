@@ -41,7 +41,8 @@ The output BUFR files can be validated using a tool such as the `ECMWF BUFR vali
 Input CSV file
 --------------
 
-Each row is treated as a separate record and one BUFR file per record created.
+Each row is treated as a separate record and one BUFR file per record created. For templates that set ``pack_subsets``,
+the rows of each station are instead encoded as the subsets of one message (see :ref:`mapping`).
 The format of the input CSV file has a few requirements:
 
 - By default a comma (i.e. ``,``) is used as the delimiter. The template can set ``delimiter`` to ``;``, ``|`` or tab.
@@ -103,7 +104,8 @@ The command line interface uses the ``transform`` function from the csv2bufr mod
        with open(output_file, "wb") as fh:  # note binary write mode
            fh.write(item["bufr4"])
 
-The ``transform`` function returns an iterator that can be used to iterate over each line in the data file.
+The ``transform`` function returns an iterator that can be used to iterate over each line in the data file or, when the
+template sets ``pack_subsets``, over each packed message (see below).
 Each item returned contains a dictionary with the following elements:
 
 - ``item["bufr4"]`` binary BUFR data (``None`` if encoding failed)
@@ -112,10 +114,13 @@ Each item returned contains a dictionary with the following elements:
 - ``item["_meta"]["geometry"]`` GeoJSON geometry object of location of data
 - ``item["_meta"]["properties"]`` key/value pairs of properties/attributes
 - ``item["_meta"]["properties"]["md5"]`` the md5 checksum of the encoded BUFR data
-- ``item["_meta"]["properties"]["wigos_station_identifier"]`` WIGOS station identifier (``None`` for a failed row)
+- ``item["_meta"]["properties"]["wigos_station_identifier"]`` WIGOS station identifier
 - ``item["_meta"]["properties"]["datetime"]`` characteristic date of data contained in result (from BUFR)
+- ``item["_meta"]["properties"]["start_datetime"]`` and ``item["_meta"]["properties"]["end_datetime"]`` time range of the
+  data (the same as ``datetime`` for a single row, unless the row's own date and time differ from the header)
 - ``item["_meta"]["properties"]["originating_centre"]`` originating centre for data (from BUFR)
 - ``item["_meta"]["properties"]["data_category"]`` data category (from BUFR)
+- ``item["_meta"]["properties"]["number_of_subsets"]`` number of subsets (rows) in the message, 1 for a single row
 - ``item["_meta"]["properties"]["template"]`` template used for the conversion: ``label``, ``version`` and ``id`` from the
   template ``metadata``. Only present if ``transform`` is called with ``include_provenance=True`` or, by default, if the
   ``CSV2BUFR_INCLUDE_PROV`` environment variable is set to ``True``. It is then set for failed rows too, so errors can be
@@ -125,6 +130,20 @@ Each item returned contains a dictionary with the following elements:
 - ``item["_meta"]["result"]["message"]`` summary message
 - ``item["_meta"]["result"]["errors"]`` list of error messages (empty on success)
 - ``item["_meta"]["result"]["warnings"]`` list of non-fatal warnings (e.g. values set to missing due to failed validation)
+
+A failed item has the same keys, with ``None`` values (``number_of_subsets`` 0), apart from
+``item["_meta"]["properties"]["wigos_station_identifier"]`` (kept if there is one station), ``template`` and ``result``.
+
+When the template sets ``pack_subsets``, the rows of each station (or, with ``pack_multiple_stations``, of the whole
+file) are encoded as the subsets of one message. The items have the same keys, and for a message with several stations
+(see :ref:`mapping` for details and an example):
+
+- ``item["_meta"]["id"]`` is ``BUFR_<md5>``
+- ``item["_meta"]["geometry"]`` covers all the locations: a ``Polygon`` of their bounding box if they differ (a
+  ``MultiPolygon`` if they cross the antimeridian)
+- ``item["_meta"]["properties"]["wigos_station_identifier"]`` is ``None``
+- ``item["_meta"]["properties"]["geometry_index"]`` is added: the subsets of each station, with its geometry, bounding
+  box and time range, e.g. to split the message into one per station
 
 Log messages written by csv2bufr while processing a row, and the messages of exceptions raised by the iterator
 (e.g. an invalid template or WIGOS station identifier), start with ``[template <id>]``.

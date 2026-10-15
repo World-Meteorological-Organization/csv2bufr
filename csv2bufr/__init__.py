@@ -39,7 +39,8 @@ from eccodes import (codes_bufr_new_from_samples,
                      codes_bufr_keys_iterator_new,
                      codes_bufr_keys_iterator_next,
                      codes_bufr_keys_iterator_delete,
-                     codes_bufr_keys_iterator_get_name, CodesInternalError)
+                     codes_bufr_keys_iterator_get_name, CodesInternalError,
+                     CODES_MISSING_DOUBLE, CODES_MISSING_LONG)
 
 import csv2bufr.templates as c2bt
 
@@ -569,6 +570,61 @@ class BUFRMessage:
                 value = value
         self.dict[key]["value"] = value
 
+    def get_values(self) -> dict:
+        """
+        Function to get the current value of every element in a subset (row).
+        This is then stored for when we pack/set multiple subsets.
+
+        :returns: `dict` of ecCodes key to value
+        """
+        return {key: self.dict[key]["value"] for key in self.dict}
+
+    def set_subsets(self, subsets: list) -> None:
+        """
+        Function to set the message to hold several subsets. Header values
+        are taken from the first subset; numberOfSubsets and compressedData
+        are set here: compressed if there is more than one subset,
+        uncompressed otherwise. Each data element is set to an array with one
+        value per subset, missing values as ecCodes missing. (This only
+        works for compressed messages, or for a single subset: in an
+        uncompressed message with several subsets ecCodes numbers the keys
+        continuously across subsets.)
+
+        :param subsets: list of `dict`, the values of each subset as
+                        returned by `get_values`
+
+        :returns: `None`
+        """
+        self.reset()
+        first = subsets[0]
+        # iterate over all the keys we are setting
+        for key in self.dict:
+            # set any header values
+            if key in HEADERS:
+                self.dict[key]["value"] = first[key]
+                continue
+            # now collect values across all subsets
+            values = [subset[key] for subset in subsets]
+            # check for all missing data
+            if all(value is None for value in values):
+                continue
+            # now make sure we have no lists
+            if any(isinstance(value, list) for value in values):
+                msg = f"Array values are not supported in packed messages ({key})"  # noqa
+                raise RuntimeError(msg)
+            # set missing value to use
+            missing = {
+                "int": CODES_MISSING_LONG,
+                "float": CODES_MISSING_DOUBLE
+            }.get(self.dict[key]["type"], "")
+            # now set values in dict - this should be list of all the values
+            # or missing value
+            self.dict[key]["value"] = \
+                [missing if value is None else value for value in values]
+        # now set number of subsets in msg and set to compress
+        self.dict["numberOfSubsets"]["value"] = len(subsets)
+        self.dict["compressedData"]["value"] = 1 if len(subsets) > 1 else 0
+
     def get_element(self, key: str) -> Any:
         """
         Function to retrieve value from BUFR message
@@ -848,39 +904,42 @@ def transform(data: str, mappings: dict,
         - ["_meta"] = GeoJSON-like metadata on the data (a Feature, with
           additional keys).
 
-    One result is returned per row and ["_meta"] contains:
+    One result is returned per message (one per row unless packing) and
+    ["_meta"] contains:
 
-        - ["id"] = identifier for the report (WIGOS_<WSI>_<ISO8601>);
-        - ["geometry"] = GeoJSON Point of the location;
+        - ["id"] = WIGOS_<WSI>_<ISO8601> if the message has one station,
+          otherwise BUFR_<md5>;
+        - ["geometry"] = GeoJSON Point of the location, or a Polygon of the
+          locations of a packed message;
         - ["properties"]:
             - ["md5"] = md5 checksum of the BUFR encoded data;
-            - ["wigos_station_identifier"] = WIGOS station identifier;
+            - ["wigos_station_identifier"] = WIGOS station identifier, None
+              if the message has several;
             - ["datetime"] = typical date/time, from the Section 1 header;
-            - ["originating_centre"] = originating centre (see Common code
-              table C11);
+            - ["start_datetime"], ["end_datetime"] = time range of the
+              subsets;
+            - ["originating_centre"] = originating centre (see Common code table C11);  # noqa
             - ["data_category"] = category of data (see BUFR Table A);
+            - ["number_of_subsets"] = number of subsets (rows);
+            - ["geometry_index"] = subsets of each station, only if the
+              message has several stations;
+    Additionally, if include_provenance is True, then the following are included  # noqa
             - ["template"] = template used, with keys "label", "version"
               and "id" (from the template metadata). Only included if
-              include_provenance is True (by default, if the
-              CSV2BUFR_INCLUDE_PROV environment variable is set to True).
-              Set for rows that fail to encode as well as for those that
-              succeed;
+              include_provenance or the environment variable
+              CSV2BUFR_INCLUDE_PROV are set to true.
         - ["result"]:
             - ["code"] = PASSED or FAILED;
             - ["message"] = summary message;
             - ["errors"] = list of errors (empty on success);
             - ["warnings"] = list of warnings.
 
-    A failed result has ["bufr4"] None and the ["_meta"] values None, apart
-    from the template and ["result"].
-
-    Log messages from csv2bufr while a row is processed are prefixed with
-    "[template <id>]", as are the messages of exceptions raised from the
-    iterator (e.g. invalid template or WIGOS station identifier).
+    If the template sets "pack_subsets" (v4), one result is returned per
+    message of packed rows, see "Packing rows as subsets" in the
+    documentation.
 
     :param data: string containing csv separated data. First line should
                 contain the column headers, second line the data
-    :param metadata: string containing static CSV metadata to include in the BUFR  # noqa
     :param mappings: dictionary containing list of BUFR elements to
                     encode (specified using ecCodes key) and whether
                     to get the value from (fixed, csv or metadata)
@@ -942,6 +1001,16 @@ def _transform(data: str, mappings: dict,
 
     if e is not SUCCESS:
         raise ValueError("Invalid mappings")
+
+    # check if we are including multiple subsets in the BUFR msg
+    pack = bool(mappings.get("pack_subsets", False)) and \
+        c2bt.schema_version(mappings) in c2bt.PACK_SUBSETS_SCHEMA_VERSIONS
+    # next check if we need to split by station
+    by_station = pack and not mappings.get("pack_multiple_stations", False)
+    # what do we do on error
+    on_row_error = mappings.get("on_row_error", "skip")
+    # now dict to store the rows
+    packed_rows = {}
 
     # identify how we are getting the WSi
     wsi = mappings.get("wigos_station_identifier")
@@ -1061,7 +1130,6 @@ def _transform(data: str, mappings: dict,
     for row in reader:
         _warnings_var.set([])
         wsi = None
-        result = dict()
         # check and make sure we have ascii data, non ASCII values are set to
         # missing, the rest of the row is still encoded
         for idx, val in enumerate(row):
@@ -1078,6 +1146,7 @@ def _transform(data: str, mappings: dict,
         # make dictionary
         data_dict = dict(zip(col_names, row))
         # parse and split WSI
+        incomplete_wsi = False
         try:
             # extract WSI and split into required components
             if wsi_kind == 2:
@@ -1090,7 +1159,12 @@ def _transform(data: str, mappings: dict,
                 wsi += f"-{parse_value(wigosIssueNumber, data_dict)}"
                 wsi += f"-{parse_value(wigosLocalIdentifierCharacter, data_dict)}"  # noqa
 
-            wsi_series, wsi_issuer, wsi_issue_number, wsi_local = wsi.split("-")   # noqa
+            parts = f"{wsi}".split("-")
+            if by_station and (len(parts) != 4 or not all(parts)):
+                # rows are grouped by station so each needs a complete WSI
+                incomplete_wsi = True
+                parts = ["", "", "", ""]
+            wsi_series, wsi_issuer, wsi_issue_number, wsi_local = parts
             data_dict["_wsi_series"] = wsi_series
             data_dict["_wsi_issuer"] = wsi_issuer
             data_dict["_wsi_issue_number"] = wsi_issue_number
@@ -1105,76 +1179,416 @@ def _transform(data: str, mappings: dict,
             # LOGGER.error(f"{msg}")
             LOGGER.debug(f"data:{data_dict}")
             raise ValueError(msg)
-        # reset BUFR message to clear data
-        message.reset()
-        cksum = None
+
+        # make sure we have a complete WSI
+        if incomplete_wsi:
+            # can't be grouped by station, fail the row on its own
+            msg = f"row {reader.line_num}: incomplete WIGOS station identifier ({wsi})"  # noqa
+            LOGGER.error(msg)
+            yield _failed_result([], provenance,
+                                 [f"{msg}\n\t\tData: {data_dict}"],
+                                 _warnings_var.get() or [])
+            continue
+
+        parsed = _parse_row(message, data_dict, mappings, reader.line_num, wsi)
+
+        # Check if we are packing
+        if pack:
+            # encode once all rows are read, grouped by station (key None if
+            # all stations go in one message)
+            group = wsi if by_station else None
+            packed_rows.setdefault(group, []).append(parsed)
+        else:
+            # encode the row on its own, from the values parsed into message
+            if parsed["error"] is None:
+                result = _result(message, [parsed["values"]], [wsi],
+                                 provenance, parsed["warnings"])
+            else:
+                LOGGER.error(parsed["error"])
+                result = _failed_result([wsi], provenance, [parsed["error"]],
+                                        parsed["warnings"])
+
+            time_ = datetime.now(timezone.utc).isoformat()
+            LOGGER.info(f"{time_}|{result['_meta']}")
+            # now yield result back to caller
+            yield result
+
+    fh.close()
+
+    # now encode the packed rows, one message per group
+    if pack:
+        for rows in packed_rows.values():
+            _warnings_var.set([])
+            result = _encode_packed(message, rows, provenance, on_row_error)
+            time_ = datetime.now(timezone.utc).isoformat()
+            LOGGER.info(f"{time_}|{result['_meta']}")
+            yield result
+
+
+def _parse_row(message: BUFRMessage, data_dict: dict, mappings: dict,
+               row_number: int, wsi: str) -> dict:
+    """
+    Parses one row into message, as a subset. The parsed values are left in
+    message, so a row encoded on its own can be encoded straight away.
+
+    :returns: `dict` with the row number, WIGOS station identifier, the
+              parsed values (None if the row could not be parsed), warnings
+              and error (None if parsed)
+    """
+    message.reset()
+    parsed = {"row": row_number, "wsi": wsi, "values": None, "error": None}
+    try:
+        message.parse(data_dict, mappings)
+        parsed["values"] = message.get_values()
+    except Exception as e:
+        parsed["error"] = f"Error ({e}) parsing row\n\t\tData: {data_dict}"
+    parsed["warnings"] = message.warnings + (_warnings_var.get() or [])
+    return parsed
+
+
+def _unique(values: list) -> list:
+    """
+    :returns: `list` of the values without duplicates, in the order first
+              seen
+    """
+    return list(dict.fromkeys(values))
+
+
+def _geometry(points: list) -> dict:
+    """
+    GeoJSON geometry for the locations of the subsets of a message: a Point
+    if there is one location, otherwise a Polygon of their bounding box
+    (counter clockwise, as RFC 7946). Locations crossing the antimeridian
+    are split first, see `_antimeridian_groups`.
+
+    :param points: list of (longitude, latitude), None where not known
+
+    :returns: `dict` GeoJSON geometry, type and coordinates None if no
+              location is known
+    """
+    points = _unique([(x, y) for x, y in points
+                      if x is not None and y is not None])
+    if not points:
+        return {"type": None, "coordinates": None}
+    if len(points) == 1:
+        return {"type": "Point", "coordinates": list(points[0])}
+    xs = [x for x, _ in points]
+    ys = [y for _, y in points]
+    west, south, east, north = min(xs), min(ys), max(xs), max(ys)
+    ring = [[west, south], [east, south], [east, north], [west, north],
+            [west, south]]
+    return {"type": "Polygon", "coordinates": [ring]}
+
+
+def _antimeridian_groups(points: list) -> list:
+    """
+    Splits locations into those west and east of the antimeridian if they
+    cross it, i.e. if their longitude range is shorter going through 180
+    than through 0.
+
+    :param points: list of (longitude, latitude), None where not known
+
+    :returns: `list` of lists of indices into points, one list if not
+              crossing the antimeridian, otherwise [east, west] (locations
+              not known go with the east)
+    """
+    lons = [x for x, y in points if x is not None and y is not None]
+    if lons:
+        shifted = [x + 360 if x < 0 else x for x in lons]
+        if max(shifted) - min(shifted) < max(lons) - min(lons):
+            west = [i for i, (x, y) in enumerate(points)
+                    if x is not None and y is not None and x < 0]
+            east = sorted(set(range(len(points))) - set(west))
+            return [east, west]
+    return [list(range(len(points)))]
+
+
+def _combine(geometries: list) -> dict:
+    """
+    :param geometries: GeoJSON geometries, from `_geometry`
+
+    :returns: `dict` the geometry if there is one, otherwise a MultiPolygon
+              (or MultiPoint) if all are Polygons (or Points), else a
+              GeometryCollection
+    """
+    geometries = [g for g in geometries if g["type"] is not None]
+    if not geometries:
+        return {"type": None, "coordinates": None}
+    if len(geometries) == 1:
+        return geometries[0]
+    types = {g["type"] for g in geometries}
+    if types == {"Polygon"}:
+        return {"type": "MultiPolygon",
+                "coordinates": [g["coordinates"] for g in geometries]}
+    if types == {"Point"}:
+        return {"type": "MultiPoint",
+                "coordinates": [g["coordinates"] for g in geometries]}
+    return {"type": "GeometryCollection", "geometries": geometries}
+
+
+def _bbox(points: list) -> list:
+    """
+    Bounding box of locations, following RFC 7946 (and STAC): if they cross
+    the antimeridian (see `_antimeridian_groups`), west is greater than
+    east.
+
+    :param points: list of (longitude, latitude), None where not known
+
+    :returns: `list` [west, south, east, north], None if no location is
+              known
+    """
+    points = [(x, y) for x, y in points if x is not None and y is not None]
+    if not points:
+        return None
+    ys = [y for _, y in points]
+    groups = _antimeridian_groups(points)
+    if len(groups) == 1:
+        xs = [x for x, _ in points]
+        return [min(xs), min(ys), max(xs), max(ys)]
+    east, west = ([points[i][0] for i in idx] for idx in groups)
+    return [min(east), min(ys), max(west), max(ys)]
+
+
+def _subset_datetime(subset: dict) -> datetime:
+    """
+    Date and time of a subset from its #1#year to #1#second elements, hour,
+    minute and second 0 if not set.
+
+    :param subset: values of a subset, as returned by `BUFRMessage.get_values`
+
+    :returns: `datetime.datetime`, None if the year, month or day is not set
+              or the date is not valid
+    """
+    parts = []
+    for i, key in enumerate(("year", "month", "day", "hour", "minute",
+                             "second")):
+        value = subset.get(f"#1#{key}")
+        if value is None or _is_missing(value):
+            if i < 3:
+                return None
+            value = 0
+        parts.append(int(value))
+    try:
+        return datetime(*parts)
+    except ValueError:
+        return None
+
+
+def _time_range(times: list, default: datetime = None) -> tuple:
+    """
+    :param times: datetimes, None where not known
+    :param default: start and end if no time is known
+
+    :returns: `tuple` (start, end)
+    """
+    times = [t for t in times if t is not None]
+    if not times:
+        return default, default
+    return min(times), max(times)
+
+
+def _extent(points: list, times: list, default: datetime = None) -> dict:
+    """
+    :returns: `dict` with the "bbox", "start_datetime" and "end_datetime"
+              of the locations and times
+    """
+    start, end = _time_range(times, default)
+    return {"bbox": _bbox(points), "start_datetime": start,
+            "end_datetime": end}
+
+
+def _geometry_index(wsis: list, points: list, times: list,
+                    default: datetime = None) -> list:
+    """
+    Index of the subsets of a message, to split it at the antimeridian or
+    by station. Subsets are numbered from 1, as for ecCodes
+    extractSubsetList.
+
+    :param wsis: WIGOS station identifier of each subset
+    :param points: (longitude, latitude) of each subset
+    :param times: datetime of each subset, None where not known
+    :param default: start and end datetime if no subset time is known
+
+    :returns: `list` with one entry, or one each side of the antimeridian,
+              each a dict with "polygon", "bbox", "start_datetime",
+              "end_datetime", "subsets" and "wigos_station_identifiers", a
+              list of dicts with the "wigos_station_identifier", "geometry",
+              "bbox", "start_datetime", "end_datetime" and "subsets" of each
+              station
+              on that side
+    """
+    def entry(idx):
+        return _extent([points[i] for i in idx], [times[i] for i in idx],
+                       default)
+
+    def subsets(idx):
+        return [i + 1 for i in idx]
+
+    geometry_index = []
+    for idx in _antimeridian_groups(points):
+        if not idx:
+            continue
+        stations = []
+        for wsi in _unique([wsis[i] for i in idx]):
+            sidx = [i for i in idx if wsis[i] == wsi]
+            stations.append({
+                "wigos_station_identifier": wsi,
+                "geometry": _geometry([points[i] for i in sidx]),
+                **entry(sidx),
+                "subsets": subsets(sidx)})
+        geometry_index.append({
+            "polygon": _geometry([points[i] for i in idx]),
+            **entry(idx),
+            "subsets": subsets(idx),
+            "wigos_station_identifiers": stations})
+    return geometry_index
+
+
+def _encode_packed(message: BUFRMessage, rows: list, provenance: dict,
+                   on_row_error: str) -> dict:
+    """
+    Encodes parsed rows (of one station, or of the whole file) as the
+    subsets of one message, compressed if there is more than one subset.
+
+    :param rows: rows as returned by `_parse_row`
+    :param provenance: added to ["_meta"]["properties"], {"template": ...}
+                       or empty
+    :param on_row_error: "skip" to leave rows that failed to parse out of
+                         the message, "fail" to fail the message
+
+    :returns: `dict` result, as yielded by `transform`
+    """
+    warnings = []
+    errors = []
+    subsets = []
+    wsis = []
+    for parsed in rows:
+        prefix = f"row {parsed['row']}: "
+        warnings.extend(prefix + w for w in parsed["warnings"])
+        if parsed["error"] is None:
+            subsets.append(parsed["values"])
+            wsis.append(parsed["wsi"])
+        elif on_row_error == "fail":
+            errors.append(prefix + parsed["error"])
+        else:
+            _collect_warning(f"{prefix}{parsed['error']}, row skipped")
+            warnings.append(f"{prefix}{parsed['error']}, row skipped")
+
+    stations = [parsed["wsi"] for parsed in rows]
+    if errors:
+        msg = f"{len(errors)} row(s) could not be parsed"
+    elif not subsets:
+        msg = "no valid rows"
+    else:
         try:
-            # parse to BUFR sequence
-            message.parse(data_dict, mappings)
-            # encode to BUFR
-            result["bufr4"] = message.as_bufr()
-            status = {
+            message.set_subsets(subsets)
+        except Exception as e:
+            msg = f"Error ({e}) setting subsets"
+        else:
+            return _result(message, subsets, wsis, provenance, warnings)
+    LOGGER.error(msg)
+    return _failed_result(stations, provenance, errors + [msg], warnings)
+
+
+def _result(message: BUFRMessage, subsets: list, wsis: list,
+            provenance: dict, warnings: list) -> dict:
+    """
+    Encodes message and returns the result, for a single row or packed
+    rows alike.
+
+    :param message: message holding the subsets
+    :param subsets: values of each subset, as returned by
+                    `BUFRMessage.get_values`
+    :param wsis: WIGOS station identifier of each subset
+    :param provenance: added to ["_meta"]["properties"], {"template": ...}
+                       or empty
+    :param warnings: warnings for the result
+
+    :returns: `dict` result, as yielded by `transform`
+    """
+    try:
+        bufr4 = message.as_bufr()
+        md5 = message.md5()
+        typical = message.get_datetime()
+        points = [(subset.get('#1#longitude'), subset.get('#1#latitude'))
+                  for subset in subsets]
+        times = [_subset_datetime(subset) for subset in subsets]
+        start, end = _time_range(times, typical)
+        stations = _unique(wsis)
+        geometry = _combine([_geometry([points[i] for i in idx])
+                             for idx in _antimeridian_groups(points) if idx])
+        if len(stations) == 1:
+            id_ = f"WIGOS_{stations[0]}_{typical.strftime('%Y%m%dT%H%M%S')}"
+        else:
+            id_ = f"BUFR_{md5}"
+        properties = {
+            "md5": md5,
+            "wigos_station_identifier":
+                stations[0] if len(stations) == 1 else None,
+            "datetime": typical,
+            "start_datetime": start,
+            "end_datetime": end,
+            "originating_centre": message.get_element("bufrHeaderCentre"),
+            "data_category": message.get_element("dataCategory"),
+            **provenance,
+            "number_of_subsets": len(subsets)
+        }
+        if len(stations) > 1:
+            properties["geometry_index"] = \
+                _geometry_index(wsis, points, times, typical)
+    except Exception as e:
+        msg = f"Error ({e}) encoding BUFR, BUFR set to None"
+        LOGGER.error(msg)
+        return _failed_result(wsis, provenance, [msg], warnings)
+
+    return {
+        "bufr4": bufr4,
+        "_meta": {
+            "id": id_,
+            "geometry": geometry,
+            "properties": properties,
+            "result": {
                 "code": PASSED,
                 "message": "",
                 "errors": [],
-                "warnings": message.warnings + (_warnings_var.get() or [])
+                "warnings": warnings
             }
-            cksum = message.md5()
-            # now identifier based on WSI and observation date as identifier
-            isodate = message.get_datetime().strftime('%Y%m%dT%H%M%S')
-            rmk = f"WIGOS_{wsi}_{isodate}"
-            # now additional metadata elements
-            result["_meta"] = {
-                "id": rmk,
-                "geometry": {
-                    "type": "Point",
-                    "coordinates": [
-                        message.get_element('#1#longitude'),
-                        message.get_element('#1#latitude')
-                    ]
-                },
-                "properties": {
-                    "md5": cksum,
-                    "wigos_station_identifier": wsi,
-                    "datetime": message.get_datetime(),
-                    "originating_centre": message.get_element("bufrHeaderCentre"),  # noqa
-                    "data_category": message.get_element("dataCategory"),
-                    **provenance
-                },
-                "result": status
-            }
+        }
+    }
 
-        except Exception as e:
-            msg = f"Error ({e}) encoding BUFR, BUFR set to None"
-            LOGGER.error(f"{msg}")
-            LOGGER.debug(f"data:{data_dict}")
-            result["bufr4"] = None
-            status = {
+
+def _failed_result(wsis: list, provenance: dict, errors: list,
+                   warnings: list) -> dict:
+    """
+    :param wsis: WIGOS station identifiers of the rows, the station is kept
+                 if there is one
+
+    :returns: `dict` failed result, as yielded by `transform`, with the same
+              keys as a result from `_result`
+    """
+    stations = _unique(wsis)
+    return {
+        "bufr4": None,
+        "_meta": {
+            "id": None,
+            "geometry": {"type": None, "coordinates": None},
+            "properties": {
+                "md5": None,
+                "wigos_station_identifier":
+                    stations[0] if len(stations) == 1 else None,
+                "datetime": None,
+                "start_datetime": None,
+                "end_datetime": None,
+                "originating_centre": None,
+                "data_category": None,
+                **provenance,
+                "number_of_subsets": 0
+            },
+            "result": {
                 "code": FAILED,
-                "message": "Error encoding row, BUFR set to None",
-                "errors": [f"{msg}\n\t\tData: {data_dict}"],
-                "warnings": message.warnings + (_warnings_var.get() or [])
+                "message": "Error encoding BUFR, BUFR set to None",
+                "errors": errors,
+                "warnings": warnings
             }
-            result["_meta"] = {
-                "id": None,
-                "geometry": {
-                    "type": None,
-                    "coordinates": None
-                },
-                "properties": {
-                    "md5": None,
-                    "wigos_station_identifier": None,
-                    "datetime": None,
-                    "originating_centre": None,
-                    "data_category": None,
-                    **provenance
-                },
-                "result": status
-            }
-
-        time_ = datetime.now(timezone.utc).isoformat()
-        LOGGER.info(f"{time_}|{result['_meta']}")
-        # now yield result back to caller
-        yield result
-
-    fh.close()
+        }
+    }

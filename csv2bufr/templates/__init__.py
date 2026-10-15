@@ -36,6 +36,8 @@ SCHEMA_VERSIONS = ['csv2bufr-template-v2.json', 'csv2bufr-template-v3.json',
 DEFAULT_SCHEMA = 'csv2bufr-template-v3.json'
 # schema versions where formats and history are enforced rather than warned
 STRICT_SCHEMA_VERSIONS = ['csv2bufr-template-v4.json']
+# schema versions supporting pack_subsets
+PACK_SUBSETS_SCHEMA_VERSIONS = ['csv2bufr-template-v4.json']
 # header keys set by csv2bufr, not allowed in STRICT_SCHEMA_VERSIONS templates
 AUTOMATIC_HEADER_KEYS = ['numberOfSubsets', 'compressedData']
 TEMPLATE_DIRS = []  # [Path("./")]
@@ -291,6 +293,13 @@ def validate_template(mapping: dict) -> bool:
         if strict:
             raise RuntimeError(f"{msg}. Invalid BUFR template mapping file: {mapping}")  # noqa
         LOGGER.warning(msg)
+
+    if mapping.get("pack_subsets", False) and \
+            schema_name not in PACK_SUBSETS_SCHEMA_VERSIONS:
+        LOGGER.warning(f"pack_subsets is not supported by {schema_name} and is ignored, rows will be encoded as separate BUFR messages")  # noqa
+    if mapping.get("pack_multiple_stations", False) and \
+            not mapping.get("pack_subsets", False):
+        LOGGER.warning("pack_multiple_stations is ignored as pack_subsets is not set")  # noqa
 
     return _SUCCESS_
 
