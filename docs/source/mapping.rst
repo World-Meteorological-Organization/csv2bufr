@@ -13,7 +13,8 @@ The supported versions are ``csv2bufr-template-v2.json``, ``csv2bufr-template-v3
 The schema specifies the following required properties:
 
 - ``conformsTo`` - array (or string) containing the schema version identifier, e.g. ``"csv2bufr-template-v4.json"``
-- ``metadata`` - object containing template metadata: ``label``, ``description``, ``version``, ``author``, ``editor``, ``dateCreated``, ``dateModified``, and ``id`` (UUID)
+- ``metadata`` - object containing template metadata: ``label``, ``description``, ``version`` and ``id`` (UUID) for v4 templates;
+  v2 and v3 templates also require ``author``, ``editor``, ``dateCreated`` and ``dateModified`` (see `Template metadata (v4)`_)
 - ``inputDelayedDescriptorReplicationFactor`` - array of integers, values for the delayed descriptor replication factors to use
 - ``inputShortDelayedDescriptorReplicationFactor`` - array of integers, values for the short delayed descriptor replication factors to use
 - ``inputExtendedDelayedDescriptorReplicationFactor`` - array of integers, values for the extended delayed descriptor replication factors to use
@@ -101,54 +102,49 @@ With ``"pack_multiple_stations": true`` as well, all the rows of the file are en
     The ``wigos_station_identifier`` is kept if the rows are for one station;
   - the warnings in ``_meta.result`` start with the line number of the row in the file (e.g. ``row 5: ...``).
 - Non-ASCII values are set to missing with a warning and the rest of the row is encoded, as without packing.
-- ``pack_subsets`` is only applied to templates that conform to ``csv2bufr-template-v4.json``. For older templates it is ignored with a warning.
+- ``pack_subsets`` is only applied to templates that conform to ``csv2bufr-template-v4.json``. For older templates it is ignored, with a warning that is logged and added to the warnings of each result.
 
-Template provenance (v4)
-------------------------
+Template metadata (v4)
+----------------------
 
-A BUFR message, or an error in one, should be traceable to the exact template version that produced it.
-Schema v4 adds two optional fields to ``metadata`` for this:
+In v4 templates ``metadata`` requires only ``label``, ``description``, ``version`` and ``id``. The optional fields are:
 
+- ``author`` and ``editor`` - strings
+- ``dateReleased`` - date this version of the template was released (``YYYY-MM-DD``)
 - ``references`` - array of the documents the template has been checked against, each with ``title`` (required), ``edition``, ``section`` and ``url``
-- ``history`` - array with one entry per version, oldest first, each with ``version``, ``id``, ``date``, ``editor`` and ``changes`` (all required)
-  and optionally ``references`` (array of strings naming the relevant sections)
+- ``deprecates`` - array of the ids of the templates this template replaces
+- ``deprecatedBy`` - array of the ids of the templates that replace this template
 
-The ``id`` is unique to the template **and** version: a new id is issued for every version and ids are never reused.
+The ``id`` is a UUID unique to the template **and** version: a new id is issued for every version and ids are never reused,
+so a BUFR message, or an error in one, can be traced to the exact template version (the id is logged when a template is
+used and prefixes warnings and errors raised while transforming).
 
 .. code-block:: json
 
    "metadata": {
-       "label": "CLIMAT",
-       "version": "1.1",
-       "id": "c802d3c6-fc95-443d-96db-41ff373a90b2",
+       "label": "DAYCLI",
+       "description": "Sequence for version 3 of the DAYCLI data format.",
+       "version": "1",
+       "dateReleased": "2026-10-16",
+       "id": "ba02512f-c312-4778-aed0-b18c30d12f4e",
+       "deprecates": ["2fe51aa5-d98a-4712-9954-45c7075462da"],
        "references": [
            {"title": "Manual on Codes (WMO-No. 306), Volume I.2",
-            "edition": "2023",
-            "section": "B/C30 - Regulations for reporting CLIMAT data in TDCF"}
-       ],
-       "history": [
-           {"version": "1.0", "id": "99cad042-a73d-40a9-a646-cf140612394d",
-            "date": "2025-07-09", "editor": "...", "changes": "Initial version."},
-           {"version": "1.1", "id": "c802d3c6-fc95-443d-96db-41ff373a90b2",
-            "date": "2026-10-07", "editor": "...",
-            "changes": "Start of month fixed to day 1, 00:00.",
-            "references": ["B/C30.1.1", "B/C30.2.1.2"]}
+            "section": "BUFR Table D - 3 07 095"}
        ]
    }
 
-(Other required ``metadata`` fields are omitted from the example.)
+For v4 templates formats are checked, and a template that fails is rejected: ``id``, ``deprecates`` and ``deprecatedBy`` must be UUIDs
+and ``dateReleased`` a valid date. For v2 and v3 templates formats are not checked.
 
-For v4 templates the following are checked, and a template that fails is rejected:
-
-- ``id`` and the history ids are UUIDs, and ``dateCreated``, ``dateModified`` and the history dates are valid dates (``YYYY-MM-DD``).
-- The last ``history`` entry has the same ``version`` and ``id`` as ``metadata``.
-- The ``history`` ids are unique.
-
-For v2 and v3 templates the formats are not checked, and the two ``history`` checks only log a warning.
+When a template is loaded, a warning is logged if it is superseded: if its ``deprecatedBy`` is set, or another indexed template
+lists its id in ``deprecates``.
 
 Changes from v3:
 
-- ``metadata.references`` and ``metadata.history`` added (optional).
+- ``metadata`` requires only ``label``, ``description``, ``version`` and ``id``; ``author`` and ``editor`` are optional.
+- ``metadata.dateReleased`` replaces ``dateCreated`` and ``dateModified``.
+- ``metadata.references``, ``metadata.deprecates`` and ``metadata.deprecatedBy`` added (optional).
 - ``metadata.id`` uses the standard ``uuid`` format (v3 used ``uuid4``, which validators do not recognise) and formats are enforced.
 - ``pack_subsets``, ``pack_multiple_stations`` and ``on_row_error`` added (optional).
 - ``numberOfSubsets`` and ``compressedData`` must not be set in the ``header``: csv2bufr sets them
@@ -156,7 +152,7 @@ Changes from v3:
 
 See "Versions and provenance" in the
 `csv2bufr-templates contributing guide <https://github.com/World-Meteorological-Organization/csv2bufr-templates/blob/main/docs/source/contributing.rst>`_
-for how ids and history are maintained for the published templates.
+for how ids are maintained for the published templates.
 
 The header and data sections contain arrays of ``bufr_element`` objects mapping to either the different fields
 in the header sections of the BUFR message or to the data section respectively. More information is provided below.
@@ -354,4 +350,4 @@ A template can be requested (e.g. ``--bufr-template`` on the command line) by:
 - its file name without the ``.json`` extension. If files with that name are found in more than one directory, the first is used and a warning lists them all;
 - the path to the template file.
 
-``csv2bufr mappings list`` shows the indexed templates, including their ``references`` and ``history``.
+``csv2bufr mappings list`` shows the indexed templates, including their ``dateReleased``, ``references``, ``deprecates`` and ``deprecatedBy``.

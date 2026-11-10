@@ -34,7 +34,7 @@ SCHEMA_VERSIONS = ['csv2bufr-template-v2.json', 'csv2bufr-template-v3.json',
                    'csv2bufr-template-v4.json']
 # schema used when the template does not name a supported version
 DEFAULT_SCHEMA = 'csv2bufr-template-v3.json'
-# schema versions where formats and history are enforced rather than warned
+# schema versions where formats (e.g. uuid, date) are checked
 STRICT_SCHEMA_VERSIONS = ['csv2bufr-template-v4.json']
 # schema versions supporting pack_subsets
 PACK_SUBSETS_SCHEMA_VERSIONS = ['csv2bufr-template-v4.json']
@@ -108,6 +108,43 @@ def describe_template(mapping: dict) -> str:
     """
     info = template_info(mapping)
     return f"'{info['label']}' version {info['version']} (id {info['id']})"
+
+
+def superseded_by(mapping: dict) -> list:
+    """
+    Returns the ids of the templates that replace a template: those in its
+    deprecatedBy, and those indexed (see `index_templates`) that list its id
+    in their deprecates.
+
+    :param mapping: dictionary containing the template
+
+    :returns: `list` of template ids, empty if the template is not superseded
+    """
+    metadata = mapping.get("metadata", {}) if isinstance(mapping, dict) else {}
+    id_ = metadata.get("id")
+    # v2/v3 schemas do not define deprecates and deprecatedBy, so check their
+    # types here
+    ids = metadata.get("deprecatedBy", [])
+    ids = list(ids) if isinstance(ids, list) else []
+    for other_id, entry in TEMPLATES.items():
+        deprecates = entry.get("deprecates", [])
+        if id_ and isinstance(deprecates, list) and id_ in deprecates and \
+                other_id not in ids:
+            ids.append(other_id)
+    return ids
+
+
+def _describe_id(id_: str) -> str:
+    """
+    :param id_: template id
+
+    :returns: `str` describing the template, as `describe_template` if it is
+              indexed, otherwise just its id
+    """
+    if id_ in TEMPLATES:
+        entry = TEMPLATES[id_]
+        return f"'{entry['label']}' version {entry['version']} (id {id_})"
+    return f"id {id_}"
 
 
 # function to load template by name
@@ -186,6 +223,10 @@ def load_template(template_name: str, isFile=False) -> Union[dict, None]:
 
         LOGGER.info(f"Using template {describe_template(template)} from {fname}")  # noqa
 
+        newer = superseded_by(template)
+        if newer:
+            LOGGER.warning(f"Template {describe_template(template)} is superseded by {', '.join(_describe_id(id_) for id_ in newer)}")  # noqa
+
         return template
 
 
@@ -208,38 +249,25 @@ def schema_version(mapping: dict) -> str:
     return DEFAULT_SCHEMA
 
 
-def check_history(mapping: dict) -> list:
+def template_warnings(mapping: dict) -> list:
     """
-    Checks the template history that JSON schema cannot express: the last
-    entry must match the current version and id, and ids must be unique.
+    Returns warnings about template options that are ignored, e.g.
+    pack_subsets in a template that does not conform to a schema version
+    supporting it.
 
     :param mapping: dictionary containing the template
 
-    :returns: `list` of problems found, empty if none
+    :returns: `list` of warning messages, empty if none
     """
-    metadata = mapping.get("metadata", {})
-    history = metadata.get("history")
-    if not history:
-        return []
-    # v2/v3 schemas do not define history, so check its shape here
-    if not isinstance(history, list) or \
-            not all(isinstance(entry, dict) for entry in history):
-        return ["history must be an array of objects"]
-
-    problems = []
-    last = history[-1]
-    if (last.get("version"), last.get("id")) != \
-            (metadata.get("version"), metadata.get("id")):
-        problems.append(
-            f"last history entry (version {last.get('version')}, id {last.get('id')}) "  # noqa
-            f"does not match metadata (version {metadata.get('version')}, id {metadata.get('id')})")  # noqa
-
-    ids = [str(entry.get("id")) for entry in history]
-    duplicates = sorted({id_ for id_ in ids if ids.count(id_) > 1})
-    if duplicates:
-        problems.append(f"duplicate ids in history: {', '.join(duplicates)}")
-
-    return problems
+    warnings = []
+    schema_name = schema_version(mapping)
+    if mapping.get("pack_subsets", False) and \
+            schema_name not in PACK_SUBSETS_SCHEMA_VERSIONS:
+        warnings.append(f"pack_subsets is not supported by {schema_name} and is ignored, rows will be encoded as separate BUFR messages")  # noqa
+    if mapping.get("pack_multiple_stations", False) and \
+            not mapping.get("pack_subsets", False):
+        warnings.append("pack_multiple_stations is ignored as pack_subsets is not set")  # noqa
+    return warnings
 
 
 def validate_template(mapping: dict) -> bool:
@@ -250,8 +278,8 @@ def validate_template(mapping: dict) -> bool:
     error otherwise.
 
     For schema versions in STRICT_SCHEMA_VERSIONS, formats (e.g. uuid, date)
-    are checked and history problems are errors. For older versions history
-    problems are logged as warnings.
+    are checked. Ignored options (see `template_warnings`) are logged as
+    warnings.
 
     :param mapping: dictionary containing mappings to specified BUFR
                         sequence using ecCodes key.
@@ -287,19 +315,8 @@ def validate_template(mapping: dict) -> bool:
         msg = f"Exception ({e}). Invalid BUFR template mapping file: {mapping}"
         raise RuntimeError(msg)
 
-    problems = check_history(mapping)
-    if problems:
-        msg = f"Invalid template history ({'; '.join(problems)})"
-        if strict:
-            raise RuntimeError(f"{msg}. Invalid BUFR template mapping file: {mapping}")  # noqa
+    for msg in template_warnings(mapping):
         LOGGER.warning(msg)
-
-    if mapping.get("pack_subsets", False) and \
-            schema_name not in PACK_SUBSETS_SCHEMA_VERSIONS:
-        LOGGER.warning(f"pack_subsets is not supported by {schema_name} and is ignored, rows will be encoded as separate BUFR messages")  # noqa
-    if mapping.get("pack_multiple_stations", False) and \
-            not mapping.get("pack_subsets", False):
-        LOGGER.warning("pack_multiple_stations is ignored as pack_subsets is not set")  # noqa
 
     return _SUCCESS_
 
@@ -344,15 +361,18 @@ def index_templates() -> bool:
                         elif id in TEMPLATES:
                             LOGGER.warning(f"Duplicate template id {id}: {fname} ignored, using {TEMPLATES[id]['path']}")  # noqa
                         else:
+                            metadata = tmpl['metadata']
                             TEMPLATES[id] = {
-                                "label": tmpl['metadata'].get("label", ""),
-                                "description": tmpl['metadata'].get("description", ""),  # noqa
-                                "version": tmpl['metadata'].get("version", ""),
-                                "author": tmpl['metadata'].get("author", ""),
-                                "dateCreated": tmpl['metadata'].get("dateCreated", ""),  # noqa
-                                "id": tmpl['metadata'].get("id", ""),
-                                "references": tmpl['metadata'].get("references", []),  # noqa
-                                "history": tmpl['metadata'].get("history", []),  # noqa
+                                "label": metadata.get("label", ""),
+                                "description": metadata.get("description", ""),  # noqa
+                                "version": metadata.get("version", ""),
+                                "author": metadata.get("author", ""),
+                                # v2/v3 templates record dateModified instead
+                                "dateReleased": metadata.get("dateReleased", metadata.get("dateModified", "")),  # noqa
+                                "id": metadata.get("id", ""),
+                                "references": metadata.get("references", []),  # noqa
+                                "deprecates": metadata.get("deprecates", []),  # noqa
+                                "deprecatedBy": metadata.get("deprecatedBy", []),  # noqa
                                 "path": fname,
                                 "name": Path(fname).stem
                             }
@@ -367,8 +387,9 @@ def list_templates() -> dict:
     """
     :returns: Dictionary of known templates in search path
               (CSV2BUFR_TEMPLATES), keyed by id. Each entry has the
-              template's label, description, version, author, dateCreated,
-              id, references and history (empty lists if not set), path and
+              template's label, description, version, author, dateReleased
+              (dateModified for v2/v3 templates), id, references,
+              deprecates and deprecatedBy (empty lists if not set), path and
               name (file name without extension). An empty dictionary is
               returned if no templates are found.
     """

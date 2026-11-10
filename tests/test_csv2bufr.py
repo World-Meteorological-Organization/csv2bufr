@@ -204,18 +204,16 @@ def mapping_dict_v4(mapping_dict):
     mapping["header"] = [h for h in mapping["header"]
                          if h["eccodes_key"] not in
                          ("numberOfSubsets", "compressedData")]
+    # v4 replaces dateCreated and dateModified with dateReleased
+    del mapping["metadata"]["dateCreated"]
+    del mapping["metadata"]["dateModified"]
+    mapping["metadata"]["dateReleased"] = "2024-01-12"
     mapping["metadata"]["references"] = [
         {"title": "Manual on Codes (WMO-No. 306), Volume I.2",
          "edition": "2023"}
     ]
-    mapping["metadata"]["history"] = [
-        {"version": "1", "id": "99cad042-a73d-40a9-a646-cf140612394d",
-         "date": "2023-09-01", "editor": "pytest",
-         "changes": "Initial version."},
-        {"version": "2", "id": "eb37ac4f-13ce-4254-b372-5c1d097ea857",
-         "date": "2024-01-12", "editor": "pytest",
-         "changes": "Second version.", "references": ["B/C1"]}
-    ]
+    mapping["metadata"]["deprecates"] = [
+        "99cad042-a73d-40a9-a646-cf140612394d"]
     return mapping
 
 
@@ -245,22 +243,33 @@ def test_validate_v4_pass(mapping_dict_v4):
     assert c2bt.validate_template(mapping_dict_v4) == SUCCESS
 
 
-def test_validate_v4_history_mismatch_fails(mapping_dict_v4):
-    mapping_dict_v4["metadata"]["history"][-1]["version"] = "3"
-    with pytest.raises(RuntimeError, match="does not match metadata"):
+def test_validate_v4_minimal_metadata_pass(mapping_dict_v4):
+    mapping_dict_v4["metadata"] = {
+        key: mapping_dict_v4["metadata"][key]
+        for key in ("label", "description", "version", "id")}
+    assert c2bt.validate_template(mapping_dict_v4) == SUCCESS
+
+
+@pytest.mark.parametrize("field", ["label", "description", "version", "id"])
+def test_validate_v4_required_metadata(mapping_dict_v4, field):
+    del mapping_dict_v4["metadata"][field]
+    with pytest.raises(RuntimeError):
         c2bt.validate_template(mapping_dict_v4)
 
 
-def test_validate_v4_duplicate_history_ids_fails(mapping_dict_v4):
-    history = mapping_dict_v4["metadata"]["history"]
-    history[0]["id"] = history[1]["id"]
-    with pytest.raises(RuntimeError, match="duplicate ids"):
-        c2bt.validate_template(mapping_dict_v4)
+def test_validate_v3_requires_dates(mapping_dict):
+    # v2 and v3 are unchanged
+    del mapping_dict["metadata"]["dateCreated"]
+    with pytest.raises(RuntimeError):
+        c2bt.validate_template(mapping_dict)
 
 
 @pytest.mark.parametrize("field, value", [
     ("id", "not-a-uuid"),
-    ("dateCreated", "2023-13-01")
+    ("dateReleased", "2023-13-01"),
+    ("deprecates", ["not-a-uuid"]),
+    ("deprecatedBy", ["not-a-uuid"]),
+    ("deprecatedBy", "eb37ac4f-13ce-4254-b372-5c1d097ea857")  # not an array
 ])
 def test_validate_v4_formats_checked(mapping_dict_v4, field, value):
     mapping_dict_v4["metadata"][field] = value
@@ -274,13 +283,10 @@ def test_validate_v4_reference_requires_title(mapping_dict_v4):
         c2bt.validate_template(mapping_dict_v4)
 
 
-def test_validate_v3_problems_warn_only(mapping_dict_v4, caplog):
-    # the same problems only warn when the template declares v3
-    mapping_dict_v4["conformsTo"] = ["csv2bufr-template-v3.json"]
-    mapping_dict_v4["metadata"]["id"] = "not-a-uuid"
-    mapping_dict_v4["metadata"]["history"][-1]["version"] = "3"
-    assert c2bt.validate_template(mapping_dict_v4) == SUCCESS
-    assert "does not match metadata" in caplog.text
+def test_validate_v3_formats_not_checked(mapping_dict):
+    mapping_dict["metadata"]["id"] = "not-a-uuid"
+    mapping_dict["metadata"]["dateCreated"] = "2023-13-01"
+    assert c2bt.validate_template(mapping_dict) == SUCCESS
 
 
 def test_validate_pack_subsets(mapping_dict_v4):
@@ -391,6 +397,15 @@ def test_is_missing_without_missing_value():
         assert not csv2bufr._is_missing("-999")
 
 
+def test_missing_numbers_cached():
+    csv2bufr._missing_numbers.cache_clear()
+    with mock.patch.object(csv2bufr, "MISSING", DEFAULT_MISSING + ["-999"]):
+        for _ in range(3):
+            assert csv2bufr._is_missing(-999)
+    info = csv2bufr._missing_numbers.cache_info()
+    assert (info.misses, info.hits) == (1, 2)
+
+
 def test_transform_unquoted_nan_is_missing(data_dict, mapping_dict):
     # with QUOTE_NONNUMERIC, unquoted values are read as floats, so NaN in
     # the file is read as a float NaN
@@ -490,40 +505,42 @@ def to_csv(rows):
     return output.getvalue()
 
 
-def test_transform_template_provenance(data_dict, mapping_dict,
-                                       template_info, caplog):
+def test_transform_logs_template(data_dict, mapping_dict, caplog):
     caplog.set_level(logging.INFO)
-    results = list(transform(to_csv([data_dict]), mapping_dict,
-                             include_provenance=True))
-    assert results[0]["_meta"]["properties"]["template"] == template_info
-    assert "Using template 'pytest' version 2 (id eb37ac4f-13ce-4254-b372-5c1d097ea857)" in caplog.text  # noqa
-
-
-def test_transform_template_provenance_off_by_default(
-        data_dict, mapping_dict):
-    # assumes CSV2BUFR_INCLUDE_PROV is not set when the tests are run
     results = list(transform(to_csv([data_dict]), mapping_dict))
+    assert "Using template 'pytest' version 2 (id eb37ac4f-13ce-4254-b372-5c1d097ea857)" in caplog.text  # noqa
+    # the template is logged, not added to the result
     assert "template" not in results[0]["_meta"]["properties"]
-    results = list(transform(to_csv([data_dict]), mapping_dict,
-                             include_provenance=False))
-    assert "template" not in results[0]["_meta"]["properties"]
 
 
-def test_transform_failed_row_has_template(data_dict, mapping_dict,
-                                           template_info):
-    # -999 K is out of the coding range for airTemperature, so encoding fails
-    data_dict["air_temperature"] = -999
-    results = list(transform(to_csv([data_dict]), mapping_dict,
-                             include_provenance=True))
-    assert results[0]["bufr4"] is None
-    assert results[0]["_meta"]["properties"]["template"] == template_info
-
-
-def test_transform_wsi_error_includes_template(data_dict, mapping_dict,
-                                               template_info):
+def test_transform_wsi_missing_column_fails_rows(data_dict, mapping_dict,
+                                                 template_info, caplog):
     mapping_dict["wigos_station_identifier"] = "data:no_such_column"
-    with pytest.raises(KeyError, match=f"\\[template {template_info['id']}\\]"):  # noqa
-        list(transform(to_csv([data_dict]), mapping_dict))
+    results = list(transform(to_csv([data_dict, data_dict]), mapping_dict))
+    # each row fails on its own, the file is not aborted
+    assert len(results) == 2
+    for row, r in zip((2, 3), results):
+        assert r["bufr4"] is None
+        assert r["_meta"]["result"]["code"] == csv2bufr.FAILED
+        assert r["_meta"]["result"]["errors"][0].startswith(
+            f"row {row}: key 'no_such_column' not found")
+    assert f"[template {template_info['id']}] row 2: key" in caplog.text
+
+
+@pytest.mark.parametrize("wsi", ["0-1-2", "0-1-2-A-B", ""])
+def test_transform_invalid_wsi_fails_row(data_dict, mapping_dict, wsi):
+    mapping_dict["wigos_station_identifier"] = "data:wsi"
+    rows = [{**data_dict, "wsi": "0-1-2-A"}, {**data_dict, "wsi": wsi},
+            {**data_dict, "wsi": "0-1-2-B"}]
+    a, bad, b = list(transform(to_csv(rows), mapping_dict))
+    assert bad["bufr4"] is None
+    assert bad["_meta"]["result"]["errors"][0].startswith(
+        f"row 3: invalid WIGOS station identifier ({wsi})")
+    # the other rows are still encoded
+    for r, expected in ((a, "0-1-2-A"), (b, "0-1-2-B")):
+        assert r["_meta"]["result"]["code"] == csv2bufr.PASSED
+        assert r["_meta"]["properties"]["wigos_station_identifier"] == \
+            expected
 
 
 def test_transform_invalid_template_includes_template(data_dict, mapping_dict,
@@ -600,8 +617,8 @@ def test_transform_warnings_not_set_for_caller(warning_rows, mapping_dict):
     list(results)
     assert csv2bufr._warnings_var.get() is None
     # nor after an error
-    mapping_dict["wigos_station_identifier"] = "data:no_such_column"
-    with pytest.raises(KeyError):
+    del mapping_dict["header"]
+    with pytest.raises(RuntimeError):
         list(transform(to_csv(warning_rows), mapping_dict))
     assert csv2bufr._warnings_var.get() is None
 
@@ -682,9 +699,8 @@ def decode_values(bufr, key):
         codes_release(msg)
 
 
-def test_transform_pack_subsets(packed_mapping, packed_rows, template_info):
-    results = list(transform(to_csv(packed_rows), packed_mapping,
-                             include_provenance=True))
+def test_transform_pack_subsets(packed_mapping, packed_rows):
+    results = list(transform(to_csv(packed_rows), packed_mapping))
 
     # one message per station, in the order first seen
     assert len(results) == 2
@@ -694,7 +710,6 @@ def test_transform_pack_subsets(packed_mapping, packed_rows, template_info):
         assert props["wigos_station_identifier"] == wsi
         assert "geometry_index" not in props  # one station
         assert props["number_of_subsets"] == n
-        assert props["template"] == template_info
         assert r["_meta"]["id"] == \
             f"WIGOS_{wsi}_{props['datetime']:%Y%m%dT%H%M%S}"
         assert r["_meta"]["geometry"] == {
@@ -710,9 +725,10 @@ def test_transform_pack_subsets(packed_mapping, packed_rows, template_info):
     assert temps == pytest.approx([290.2])
 
 
-@pytest.mark.parametrize("wsi", ["", "0-1-2-"])
+@pytest.mark.parametrize("wsi, error", [("", "invalid"),
+                                        ("0-1-2-", "incomplete")])
 def test_transform_pack_subsets_incomplete_wsi(packed_mapping, packed_rows,
-                                               wsi):
+                                               wsi, error):
     packed_rows[1]["wsi"] = wsi
     results = list(transform(to_csv(packed_rows), packed_mapping))
     # the row fails on its own, the other station is still encoded
@@ -721,21 +737,18 @@ def test_transform_pack_subsets_incomplete_wsi(packed_mapping, packed_rows,
     assert bad["bufr4"] is None
     assert bad["_meta"]["result"]["code"] == csv2bufr.FAILED
     assert bad["_meta"]["result"]["errors"][0].startswith(
-        "row 3: incomplete WIGOS station identifier")
+        f"row 3: {error} WIGOS station identifier")
     assert a["_meta"]["properties"]["number_of_subsets"] == 2
 
 
-def test_transform_pack_multiple_stations(multi_mapping, packed_rows,
-                                          template_info):
-    results = list(transform(to_csv(packed_rows), multi_mapping,
-                             include_provenance=True))
+def test_transform_pack_multiple_stations(multi_mapping, packed_rows):
+    results = list(transform(to_csv(packed_rows), multi_mapping))
 
     # all rows of the file in one message
     assert len(results) == 1
     r = results[0]
     props = r["_meta"]["properties"]
     assert props["number_of_subsets"] == 3
-    assert props["template"] == template_info
     # several stations
     assert props["wigos_station_identifier"] is None
     assert [s["wigos_station_identifier"] for s in
@@ -862,6 +875,14 @@ def test_failed_result_format_same_for_all_paths(data_dict, mapping_dict,
      datetime(2021, 11, 18, 6, 0, 30)),
     ({"#1#year": 2021, "#1#month": 11, "#1#hour": 6}, None),  # no day
     ({"#1#year": 2021, "#1#month": 2, "#1#day": 30}, None),  # not valid
+    # DAYCLI (3 07 095): #1#hour comes after #2#year so is not the hour of
+    # the #1# date, the date is used on its own
+    ({"#1#year": 2021, "#1#month": 11, "#1#day": 1, "#2#year": 2021,
+      "#2#month": 11, "#2#day": 1, "#1#hour": 12, "#1#minute": 0},
+     datetime(2021, 11, 1)),
+    # elements before the first year are not part of the date
+    ({"#1#hour": 12, "#1#year": 2021, "#1#month": 11, "#1#day": 1,
+      "#2#hour": 6}, datetime(2021, 11, 1, 6)),
 ])
 def test_subset_datetime(subset, expected):
     assert csv2bufr._subset_datetime(subset) == expected
@@ -974,27 +995,41 @@ def test_transform_pack_subsets_row_error_skip(multi_mapping, packed_rows):
     assert temps == pytest.approx([290.2, 281.3])
 
 
-def test_transform_pack_subsets_row_error_fail(multi_mapping, packed_rows,
-                                               template_info):
+def test_transform_pack_subsets_row_error_fail(multi_mapping, packed_rows):
     multi_mapping["on_row_error"] = "fail"
     packed_rows[0]["air_temperature"] = "abc"
-    results = list(transform(to_csv(packed_rows), multi_mapping,
-                             include_provenance=True))
+    results = list(transform(to_csv(packed_rows), multi_mapping))
     assert len(results) == 1
     a = results[0]
     assert a["bufr4"] is None
     assert a["_meta"]["result"]["code"] == csv2bufr.FAILED
     assert a["_meta"]["result"]["errors"][0].startswith("row 2: ")
-    assert a["_meta"]["properties"]["template"] == template_info
     # several stations, so none kept
     assert a["_meta"]["properties"]["wigos_station_identifier"] is None
 
 
-def test_transform_pack_subsets_needs_v4(packed_mapping, packed_rows, caplog):
+def test_transform_pack_subsets_needs_v4(packed_mapping, packed_rows,
+                                         mapping_dict, caplog):
     packed_mapping["conformsTo"] = ["csv2bufr-template-v3.json"]
+    packed_mapping["metadata"] = mapping_dict["metadata"]
     results = list(transform(to_csv(packed_rows), packed_mapping))
     assert len(results) == 3
     assert "pack_subsets is not supported" in caplog.text
+    # the warning is in every result, not only logged
+    for r in results:
+        assert r["_meta"]["result"]["warnings"][0].startswith(
+            "pack_subsets is not supported by csv2bufr-template-v3.json")
+
+
+def test_transform_pack_multiple_stations_ignored_warns(packed_mapping,
+                                                        packed_rows):
+    packed_mapping["pack_subsets"] = False
+    packed_mapping["pack_multiple_stations"] = True
+    results = list(transform(to_csv(packed_rows), packed_mapping))
+    assert len(results) == 3
+    for r in results:
+        assert r["_meta"]["result"]["warnings"] == [
+            "pack_multiple_stations is ignored as pack_subsets is not set"]
 
 
 def test_transform_pack_subsets_row_error_fail_per_station(packed_mapping,
@@ -1047,12 +1082,16 @@ def template_dirs(tmp_path, mapping_dict_v4):
         dir_.mkdir()
 
     def write(dir_index, name, id_, version="2",
-              conforms_to="csv2bufr-template-v4.json"):
+              conforms_to="csv2bufr-template-v4.json", **metadata):
         tmpl = copy.deepcopy(mapping_dict_v4)
         tmpl["conformsTo"] = [conforms_to]
         tmpl["metadata"]["id"] = id_
         tmpl["metadata"]["version"] = version
-        tmpl["metadata"]["history"][-1].update(id=id_, version=version)
+        if conforms_to != "csv2bufr-template-v4.json":
+            # required by v2 and v3
+            tmpl["metadata"]["dateCreated"] = "2023-09-01"
+            tmpl["metadata"]["dateModified"] = "2024-01-12"
+        tmpl["metadata"].update(metadata)
         path = dirs[dir_index] / f"{name}.json"
         path.write_text(json.dumps(tmpl))
         return str(path)
@@ -1117,13 +1156,55 @@ def test_load_template_by_name_duplicates_warn(template_dirs, caplog):
     assert f"Several templates named 'pytest' found ({first}, {second}), using {first}" in caplog.text  # noqa
 
 
-def test_index_includes_provenance(template_dirs, mapping_dict_v4):
+def test_index_includes_metadata(template_dirs, mapping_dict_v4):
     t = template_dirs
-    t.write(0, "a", ID_A)
+    t.write(0, "a", ID_A, deprecatedBy=[ID_B])
     c2bt.index_templates()
     entry = c2bt.TEMPLATES[ID_A]
-    assert entry["references"] == mapping_dict_v4["metadata"]["references"]
-    assert [h["version"] for h in entry["history"]] == ["1", "2"]
+    metadata = mapping_dict_v4["metadata"]
+    assert entry["dateReleased"] == metadata["dateReleased"]
+    assert entry["references"] == metadata["references"]
+    assert entry["deprecates"] == metadata["deprecates"]
+    assert entry["deprecatedBy"] == [ID_B]
+    assert "history" not in entry
+
+
+def test_index_v3_date_released(template_dirs):
+    # v2/v3 templates have no dateReleased, dateModified is shown instead
+    t = template_dirs
+    t.write(0, "a", ID_A, conforms_to="csv2bufr-template-v3.json")
+    c2bt.index_templates()
+    assert c2bt.TEMPLATES[ID_A]["dateReleased"] == "2024-01-12"
+
+
+def test_load_template_superseded_by_deprecates(template_dirs, caplog):
+    # the newer template lists the older one in deprecates
+    t = template_dirs
+    t.write(0, "pytest-v1", ID_A, version="1", deprecates=[])
+    t.write(0, "pytest-v2", ID_B, version="2", deprecates=[ID_A])
+    c2bt.index_templates()
+    c2bt.load_template(ID_A)
+    assert f"Template 'pytest' version 1 (id {ID_A}) is superseded by 'pytest' version 2 (id {ID_B})" in caplog.text  # noqa
+    caplog.clear()
+    c2bt.load_template(ID_B)
+    assert "superseded" not in caplog.text
+
+
+def test_load_template_superseded_by_deprecated_by(template_dirs, caplog):
+    # deprecatedBy names a template that is not installed
+    t = template_dirs
+    t.write(0, "pytest-v1", ID_A, version="1", deprecatedBy=[ID_B])
+    c2bt.index_templates()
+    c2bt.load_template(ID_A)
+    assert f"Template 'pytest' version 1 (id {ID_A}) is superseded by id {ID_B}" in caplog.text  # noqa
+
+
+def test_superseded_by_not_listed_twice(template_dirs):
+    t = template_dirs
+    t.write(0, "pytest-v1", ID_A, version="1", deprecatedBy=[ID_B])
+    t.write(0, "pytest-v2", ID_B, version="2", deprecates=[ID_A])
+    c2bt.index_templates()
+    assert c2bt.superseded_by(c2bt.load_template(ID_A)) == [ID_B]
 
 
 def test_load_template_logs_template(caplog):

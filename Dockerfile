@@ -18,7 +18,7 @@
 # under the License.
 #
 ###############################################################################
-FROM wmoim/dim_eccodes_baseimage:noble_eccodes-2.47
+FROM wmoim/dim_eccodes_baseimage:noble_eccodes-2.48
 
 # update image
 RUN apt-get update -y && \

@@ -121,10 +121,6 @@ Each item returned contains a dictionary with the following elements:
 - ``item["_meta"]["properties"]["originating_centre"]`` originating centre for data (from BUFR)
 - ``item["_meta"]["properties"]["data_category"]`` data category (from BUFR)
 - ``item["_meta"]["properties"]["number_of_subsets"]`` number of subsets (rows) in the message, 1 for a single row
-- ``item["_meta"]["properties"]["template"]`` template used for the conversion: ``label``, ``version`` and ``id`` from the
-  template ``metadata``. Only present if ``transform`` is called with ``include_provenance=True`` or, by default, if the
-  ``CSV2BUFR_INCLUDE_PROV`` environment variable is set to ``True``. It is then set for failed rows too, so errors can be
-  traced to the exact template version (see :ref:`mapping`)
 - ``item["_meta"]["result"]`` encoding status dictionary
 - ``item["_meta"]["result"]["code"]`` 1 if encoding succeeded, 0 if it failed
 - ``item["_meta"]["result"]["message"]`` summary message
@@ -132,7 +128,7 @@ Each item returned contains a dictionary with the following elements:
 - ``item["_meta"]["result"]["warnings"]`` list of non-fatal warnings (e.g. values set to missing due to failed validation)
 
 A failed item has the same keys, with ``None`` values (``number_of_subsets`` 0), apart from
-``item["_meta"]["properties"]["wigos_station_identifier"]`` (kept if there is one station), ``template`` and ``result``.
+``item["_meta"]["properties"]["wigos_station_identifier"]`` (kept if there is one station) and ``result``.
 
 When the template sets ``pack_subsets``, the rows of each station (or, with ``pack_multiple_stations``, of the whole
 file) are encoded as the subsets of one message. The items have the same keys, and for a message with several stations
@@ -146,4 +142,5 @@ file) are encoded as the subsets of one message. The items have the same keys, a
   box and time range, e.g. to split the message into one per station
 
 Log messages written by csv2bufr while processing a row, and the messages of exceptions raised by the iterator
-(e.g. an invalid template or WIGOS station identifier), start with ``[template <id>]``.
+(e.g. an invalid template), start with ``[template <id>]``. A row whose WIGOS station identifier cannot be read, or
+does not have four parts separated by ``-``, is returned as a failed result and the remaining rows are still processed.

@@ -31,6 +31,7 @@ import logging
 import math
 import os.path
 from contextvars import ContextVar
+from functools import lru_cache
 from typing import Any, Iterator, Union
 
 from eccodes import (codes_bufr_new_from_samples,
@@ -60,11 +61,6 @@ if 'CSV2BUFR_NULLIFY_INVALID' in os.environ:
         NULLIFY_INVALID = False
 else:
     NULLIFY_INVALID = True
-
-# include the template used in _meta.properties (off by default, as extra
-# properties may break downstream consumers)
-INCLUDE_PROV = os.environ.get(
-    "CSV2BUFR_INCLUDE_PROV", "False").lower() in ("true", "1", "yes")
 
 LOGGER = logging.getLogger(__name__)
 
@@ -162,14 +158,16 @@ QUOTECHAR = '"'
 # error validating data
 
 
-def _missing_numbers(missing: list) -> set:
+@lru_cache(maxsize=8)
+def _missing_numbers(missing: tuple) -> frozenset:
     """
     Returns the entries in a list of missing values that are numbers (e.g.
-    the value of CSV2BUFR_MISSING_VALUE), as floats.
+    the value of CSV2BUFR_MISSING_VALUE), as floats. Cached, as it is called
+    for every value.
 
-    :param missing: list of missing values, e.g. MISSING
+    :param missing: missing values, e.g. tuple(MISSING)
 
-    :returns: `set` of floats
+    :returns: `frozenset` of floats
     """
     numbers = set()
     for m in missing:
@@ -180,7 +178,7 @@ def _missing_numbers(missing: list) -> set:
                 continue
             if not math.isnan(number):
                 numbers.add(number)
-    return numbers
+    return frozenset(numbers)
 
 
 def _is_missing(value: Any) -> bool:
@@ -203,7 +201,7 @@ def _is_missing(value: Any) -> bool:
     if isinstance(value, (int, float)):
         if math.isnan(value):
             return True
-        return float(value) in _missing_numbers(missing)
+        return float(value) in _missing_numbers(tuple(missing))
     if isinstance(value, str):
         if value in missing:
             return True
@@ -211,7 +209,7 @@ def _is_missing(value: Any) -> bool:
             number = float(value)
         except ValueError:
             return False
-        return number in _missing_numbers(missing)
+        return number in _missing_numbers(tuple(missing))
     return value in missing
 
 
@@ -887,8 +885,7 @@ def _exception_message(e: Exception) -> str:
     return str(e)
 
 
-def transform(data: str, mappings: dict,
-              include_provenance: bool = None) -> Iterator[dict]:
+def transform(data: str, mappings: dict) -> Iterator[dict]:
     """
     This function returns an iterator to process each line in the input CSV
     string. On each iteration a dictionary is returned containing the BUFR
@@ -923,11 +920,6 @@ def transform(data: str, mappings: dict,
             - ["number_of_subsets"] = number of subsets (rows);
             - ["geometry_index"] = subsets of each station, only if the
               message has several stations;
-    Additionally, if include_provenance is True, then the following are included  # noqa
-            - ["template"] = template used, with keys "label", "version"
-              and "id" (from the template metadata). Only included if
-              include_provenance or the environment variable
-              CSV2BUFR_INCLUDE_PROV are set to true.
         - ["result"]:
             - ["code"] = PASSED or FAILED;
             - ["message"] = summary message;
@@ -943,18 +935,12 @@ def transform(data: str, mappings: dict,
     :param mappings: dictionary containing list of BUFR elements to
                     encode (specified using ecCodes key) and whether
                     to get the value from (fixed, csv or metadata)
-    :param include_provenance: whether to add the template to
-                               ["_meta"]["properties"], defaults to the
-                               CSV2BUFR_INCLUDE_PROV environment variable
 
     :returns: iterator
     """
-    if include_provenance is None:
-        include_provenance = INCLUDE_PROV
     template = c2bt.template_info(mappings)
     LOGGER.info(f"Using template {c2bt.describe_template(mappings)}")
-    provenance = {"template": dict(template)} if include_provenance else {}
-    rows = _transform(data, mappings, provenance)
+    rows = _transform(data, mappings)
     try:
         while True:
             # set the template and warnings only while csv2bufr code runs,
@@ -982,13 +968,9 @@ def transform(data: str, mappings: dict,
         rows.close()
 
 
-def _transform(data: str, mappings: dict,
-               provenance: dict) -> Iterator[dict]:
+def _transform(data: str, mappings: dict) -> Iterator[dict]:
     """
     Implements `transform`, see there for details.
-
-    :param provenance: added to ["_meta"]["properties"] of each result,
-                       {"template": ...} or empty
 
     Warnings are collected per row in `_warnings_var`. It is set here but not
     reset: `transform` resets it after each step, so no token is held across
@@ -1001,6 +983,9 @@ def _transform(data: str, mappings: dict,
 
     if e is not SUCCESS:
         raise ValueError("Invalid mappings")
+
+    # ignored template options, added to the warnings of every result
+    template_warnings = c2bt.template_warnings(mappings)
 
     # check if we are including multiple subsets in the BUFR msg
     pack = bool(mappings.get("pack_subsets", False)) and \
@@ -1145,8 +1130,8 @@ def _transform(data: str, mappings: dict,
                         raise ValueError(msg)
         # make dictionary
         data_dict = dict(zip(col_names, row))
-        # parse and split WSI
-        incomplete_wsi = False
+        # parse and split WSI, a row without a valid WSI fails on its own
+        wsi_error = None
         try:
             # extract WSI and split into required components
             if wsi_kind == 2:
@@ -1158,37 +1143,33 @@ def _transform(data: str, mappings: dict,
                 wsi += f"-{parse_value(wigosIssuerOfIdentifier, data_dict)}"
                 wsi += f"-{parse_value(wigosIssueNumber, data_dict)}"
                 wsi += f"-{parse_value(wigosLocalIdentifierCharacter, data_dict)}"  # noqa
-
-            parts = f"{wsi}".split("-")
-            if by_station and (len(parts) != 4 or not all(parts)):
-                # rows are grouped by station so each needs a complete WSI
-                incomplete_wsi = True
-                parts = ["", "", "", ""]
-            wsi_series, wsi_issuer, wsi_issue_number, wsi_local = parts
-            data_dict["_wsi_series"] = wsi_series
-            data_dict["_wsi_issuer"] = wsi_issuer
-            data_dict["_wsi_issue_number"] = wsi_issue_number
-            data_dict["_wsi_local"] = wsi_local
         except KeyError as e:
-            msg = f"Error, key {e} not found in input data when building WIGOS station identifier"  # noqa
-            # LOGGER.error(f"{msg}")
-            LOGGER.debug(f"data:{data_dict}")
-            raise KeyError(msg)
+            wsi_error = f"key {e} not found in input data when building WIGOS station identifier"  # noqa
         except Exception as e:
-            msg = f"Error ({e}) parsing WIGOS station identifier"
-            # LOGGER.error(f"{msg}")
-            LOGGER.debug(f"data:{data_dict}")
-            raise ValueError(msg)
+            wsi_error = f"error ({e}) parsing WIGOS station identifier"
 
-        # make sure we have a complete WSI
-        if incomplete_wsi:
-            # can't be grouped by station, fail the row on its own
-            msg = f"row {reader.line_num}: incomplete WIGOS station identifier ({wsi})"  # noqa
+        if wsi_error is None:
+            parts = f"{wsi}".split("-")
+            if len(parts) != 4:
+                wsi_error = f"invalid WIGOS station identifier ({wsi})"
+            elif by_station and not all(parts):
+                # rows are grouped by station so each needs a complete WSI
+                wsi_error = f"incomplete WIGOS station identifier ({wsi})"
+
+        if wsi_error is not None:
+            msg = f"row {reader.line_num}: {wsi_error}"
             LOGGER.error(msg)
-            yield _failed_result([], provenance,
-                                 [f"{msg}\n\t\tData: {data_dict}"],
-                                 _warnings_var.get() or [])
+            LOGGER.debug(f"data:{data_dict}")
+            warnings = template_warnings + (_warnings_var.get() or [])
+            yield _failed_result([], [f"{msg}\n\t\tData: {data_dict}"],
+                                 warnings)
             continue
+
+        wsi_series, wsi_issuer, wsi_issue_number, wsi_local = parts
+        data_dict["_wsi_series"] = wsi_series
+        data_dict["_wsi_issuer"] = wsi_issuer
+        data_dict["_wsi_issue_number"] = wsi_issue_number
+        data_dict["_wsi_local"] = wsi_local
 
         parsed = _parse_row(message, data_dict, mappings, reader.line_num, wsi)
 
@@ -1200,13 +1181,13 @@ def _transform(data: str, mappings: dict,
             packed_rows.setdefault(group, []).append(parsed)
         else:
             # encode the row on its own, from the values parsed into message
+            warnings = template_warnings + parsed["warnings"]
             if parsed["error"] is None:
                 result = _result(message, [parsed["values"]], [wsi],
-                                 provenance, parsed["warnings"])
+                                 warnings)
             else:
                 LOGGER.error(parsed["error"])
-                result = _failed_result([wsi], provenance, [parsed["error"]],
-                                        parsed["warnings"])
+                result = _failed_result([wsi], [parsed["error"]], warnings)
 
             time_ = datetime.now(timezone.utc).isoformat()
             LOGGER.info(f"{time_}|{result['_meta']}")
@@ -1219,7 +1200,8 @@ def _transform(data: str, mappings: dict,
     if pack:
         for rows in packed_rows.values():
             _warnings_var.set([])
-            result = _encode_packed(message, rows, provenance, on_row_error)
+            result = _encode_packed(message, rows, on_row_error,
+                                    template_warnings)
             time_ = datetime.now(timezone.utc).isoformat()
             LOGGER.info(f"{time_}|{result['_meta']}")
             yield result
@@ -1351,18 +1333,31 @@ def _bbox(points: list) -> list:
 
 def _subset_datetime(subset: dict) -> datetime:
     """
-    Date and time of a subset from its #1#year to #1#second elements, hour,
-    minute and second 0 if not set.
+    Date and time of a subset from its first year, month, day, hour, minute
+    and second elements (in descriptor order), hour, minute and second 0 if
+    not set.
 
     :param subset: values of a subset, as returned by `BUFRMessage.get_values`
 
     :returns: `datetime.datetime`, None if the year, month or day is not set
               or the date is not valid
     """
+    keys = ("year", "month", "day", "hour", "minute", "second")
+    # take the first date/time group, from the first year up to the next
+    # repeated element. The keys are in descriptor order, so e.g. in DAYCLI
+    # (3 07 095) #1#hour comes after #2#year and is the hour of another date
+    group = {}
+    for key, value in subset.items():
+        name = key.rsplit("#", 1)[-1]
+        if name not in keys or (not group and name != "year"):
+            continue
+        if name in group:
+            break
+        group[name] = value
+
     parts = []
-    for i, key in enumerate(("year", "month", "day", "hour", "minute",
-                             "second")):
-        value = subset.get(f"#1#{key}")
+    for i, key in enumerate(keys):
+        value = group.get(key)
         if value is None or _is_missing(value):
             if i < 3:
                 return None
@@ -1444,21 +1439,21 @@ def _geometry_index(wsis: list, points: list, times: list,
     return geometry_index
 
 
-def _encode_packed(message: BUFRMessage, rows: list, provenance: dict,
-                   on_row_error: str) -> dict:
+def _encode_packed(message: BUFRMessage, rows: list, on_row_error: str,
+                   template_warnings: list) -> dict:
     """
     Encodes parsed rows (of one station, or of the whole file) as the
     subsets of one message, compressed if there is more than one subset.
 
     :param rows: rows as returned by `_parse_row`
-    :param provenance: added to ["_meta"]["properties"], {"template": ...}
-                       or empty
     :param on_row_error: "skip" to leave rows that failed to parse out of
                          the message, "fail" to fail the message
+    :param template_warnings: warnings about the template, put first in the
+                              warnings of the result
 
     :returns: `dict` result, as yielded by `transform`
     """
-    warnings = []
+    warnings = list(template_warnings)
     errors = []
     subsets = []
     wsis = []
@@ -1485,13 +1480,13 @@ def _encode_packed(message: BUFRMessage, rows: list, provenance: dict,
         except Exception as e:
             msg = f"Error ({e}) setting subsets"
         else:
-            return _result(message, subsets, wsis, provenance, warnings)
+            return _result(message, subsets, wsis, warnings)
     LOGGER.error(msg)
-    return _failed_result(stations, provenance, errors + [msg], warnings)
+    return _failed_result(stations, errors + [msg], warnings)
 
 
 def _result(message: BUFRMessage, subsets: list, wsis: list,
-            provenance: dict, warnings: list) -> dict:
+            warnings: list) -> dict:
     """
     Encodes message and returns the result, for a single row or packed
     rows alike.
@@ -1500,8 +1495,6 @@ def _result(message: BUFRMessage, subsets: list, wsis: list,
     :param subsets: values of each subset, as returned by
                     `BUFRMessage.get_values`
     :param wsis: WIGOS station identifier of each subset
-    :param provenance: added to ["_meta"]["properties"], {"template": ...}
-                       or empty
     :param warnings: warnings for the result
 
     :returns: `dict` result, as yielded by `transform`
@@ -1530,7 +1523,6 @@ def _result(message: BUFRMessage, subsets: list, wsis: list,
             "end_datetime": end,
             "originating_centre": message.get_element("bufrHeaderCentre"),
             "data_category": message.get_element("dataCategory"),
-            **provenance,
             "number_of_subsets": len(subsets)
         }
         if len(stations) > 1:
@@ -1539,7 +1531,7 @@ def _result(message: BUFRMessage, subsets: list, wsis: list,
     except Exception as e:
         msg = f"Error ({e}) encoding BUFR, BUFR set to None"
         LOGGER.error(msg)
-        return _failed_result(wsis, provenance, [msg], warnings)
+        return _failed_result(wsis, [msg], warnings)
 
     return {
         "bufr4": bufr4,
@@ -1557,8 +1549,7 @@ def _result(message: BUFRMessage, subsets: list, wsis: list,
     }
 
 
-def _failed_result(wsis: list, provenance: dict, errors: list,
-                   warnings: list) -> dict:
+def _failed_result(wsis: list, errors: list, warnings: list) -> dict:
     """
     :param wsis: WIGOS station identifiers of the rows, the station is kept
                  if there is one
@@ -1581,7 +1572,6 @@ def _failed_result(wsis: list, provenance: dict, errors: list,
                 "end_datetime": None,
                 "originating_centre": None,
                 "data_category": None,
-                **provenance,
                 "number_of_subsets": 0
             },
             "result": {

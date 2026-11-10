@@ -15,10 +15,6 @@
                 "label",
                 "description",
                 "version",
-                "author",
-                "editor",
-                "dateCreated",
-                "dateModified",
                 "id"
             ],
             "properties": {
@@ -37,13 +33,10 @@
                 "editor": {
                     "type": "string"
                 },
-                "dateCreated": {
+                "dateReleased": {
                     "type": "string",
-                    "format": "date"
-                },
-                "dateModified": {
-                    "type": "string",
-                    "format": "date"
+                    "format": "date",
+                    "description": "Date this version of the template was released"
                 },
                 "id": {
                     "type": "string",
@@ -57,12 +50,21 @@
                     },
                     "description": "Documents the template has been checked against"
                 },
-                "history": {
+                "deprecates": {
                     "type": "array",
                     "items": {
-                        "$ref": "#/$defs/history_entry"
+                        "type": "string",
+                        "format": "uuid"
                     },
-                    "description": "One entry per version, oldest first, the last entry must match the current version and id"
+                    "description": "Ids of the templates this template replaces"
+                },
+                "deprecatedBy": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "description": "Ids of the templates that replace this template"
                 }
             }
         },
@@ -191,42 +193,6 @@
             },
             "required": [
                 "title"
-            ]
-        },
-        "history_entry": {
-            "type": "object",
-            "properties": {
-                "version": {
-                    "type": "string"
-                },
-                "id": {
-                    "type": "string",
-                    "format": "uuid"
-                },
-                "date": {
-                    "type": "string",
-                    "format": "date"
-                },
-                "editor": {
-                    "type": "string"
-                },
-                "changes": {
-                    "type": "string"
-                },
-                "references": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    },
-                    "description": "Sections of the documents in metadata.references relevant to this change"
-                }
-            },
-            "required": [
-                "version",
-                "id",
-                "date",
-                "editor",
-                "changes"
             ]
         },
         "bufr_element": {
